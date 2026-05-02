@@ -5,19 +5,12 @@ import ProtocolChart from './components/ProtocolChart';
 import SummaryCards from './components/SummaryCards';
 import WebsitesTab from './components/WebsitesTab';
 import SecurityTab from './components/SecurityTab';
+import PrivacyReport from './components/PrivacyReport';
 import { parseWiresharkJSON } from './utils/parser';
-import { Activity, Monitor, Globe, Shield, BarChart2 } from 'lucide-react';
-
-const TABS = [
-  { id: "overview",  label: "Overview",  icon: BarChart2 },
-  { id: "devices",   label: "Devices",   icon: Monitor   },
-  { id: "websites",  label: "Websites",  icon: Globe     },
-  { id: "security",  label: "Security",  icon: Shield    },
-];
+import { Activity, AlertTriangle } from 'lucide-react';
 
 export default function App() {
   const [parsedData, setParsedData] = useState(null);
-  const [activeTab, setActiveTab] = useState("overview");
 
   function handleFile(file) {
     const reader = new FileReader();
@@ -26,13 +19,16 @@ export default function App() {
         const json = JSON.parse(e.target.result);
         const data = parseWiresharkJSON(json);
         setParsedData(data);
-        setActiveTab("overview");
       } catch {
         alert("Invalid file! Export from Wireshark as JSON.");
       }
     };
     reader.readAsText(file);
   }
+
+  const criticalAlerts = parsedData?.security?.filter(
+    a => a.severity === "critical"
+  ) || [];
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200
@@ -59,12 +55,22 @@ export default function App() {
                 SniffPal
               </h1>
               <p className="text-slate-500 text-xs">
-                Network Intelligence Tool
+                Network Intelligence Tool · v1.0.5
               </p>
             </div>
           </div>
           {parsedData && (
             <div className="flex items-center gap-4">
+              {criticalAlerts.length > 0 && (
+                <div className="flex items-center gap-2
+                bg-red-900/30 border border-red-800/50
+                px-3 py-1.5 rounded-full">
+                  <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+                  <span className="text-red-400 text-xs font-medium">
+                    {criticalAlerts.length} threat{criticalAlerts.length > 1 ? "s" : ""} detected
+                  </span>
+                </div>
+              )}
               <span className="text-slate-500 text-xs">
                 {parsedData.totalPackets.toLocaleString()} packets
                 · {parsedData.totalMB} MB
@@ -79,48 +85,13 @@ export default function App() {
             </div>
           )}
         </div>
-
-        {/* Tabs */}
-        {parsedData && (
-          <div className="max-w-7xl mx-auto px-6 flex gap-1 pb-0">
-            {TABS.map((tab) => {
-              const Icon = tab.icon;
-              const isActive = activeTab === tab.id;
-              const alertCount = tab.id === "security"
-                ? parsedData.security.filter(a => a.severity !== "good").length
-                : tab.id === "websites" && parsedData.trackers?.length > 0
-                ? parsedData.trackers.length
-                : null;
-              return (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-2 px-4 py-3
-                  text-sm font-medium border-b-2 transition-all
-                  relative ${isActive
-                    ? "border-cyan-400 text-cyan-400"
-                    : "border-transparent text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  <Icon className="w-4 h-4" />
-                  {tab.label}
-                  {alertCount > 0 && (
-                    <span className="bg-red-500 text-white text-xs
-                    rounded-full w-4 h-4 flex items-center
-                    justify-center font-bold">
-                      {alertCount}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        )}
       </header>
 
       {/* Main */}
       <main className="max-w-7xl mx-auto px-6 py-8 relative z-10">
         {!parsedData ? (
+
+          /* Upload Screen */
           <div className="flex flex-col items-center
           justify-center min-h-[75vh]">
             <div className="text-center mb-8">
@@ -130,59 +101,105 @@ export default function App() {
               <p className="text-slate-400 text-sm max-w-md mx-auto">
                 Like Chrome DevTools — but for your entire network.
                 Drop a Wireshark file and see every device,
-                website, and security alert.
+                website, tracker, and security alert instantly.
                 <span className="text-green-400"> 100% local.</span>
               </p>
               <div className="flex items-center justify-center
               gap-6 mt-4 text-xs text-slate-500">
-                <span>📱 Device Detection</span>
-                <span>🌐 Sites Visited</span>
-                <span>⚠️ Security Alerts</span>
-                <span>👁️ Tracker Detection</span>
+                <span>📱 Devices</span>
+                <span>🌐 Websites</span>
+                <span>👁️ Trackers</span>
+                <span>⚠️ Security</span>
               </div>
             </div>
             <FileUpload onFile={handleFile} />
             <p className="mt-6 text-slate-600 text-xs">
-              Export from Wireshark: File → Export Packet Dissections → As JSON
+              Wireshark: File → Export Packet Dissections → As JSON
             </p>
           </div>
+
         ) : (
+
+          /* Dashboard */
           <div className="space-y-6">
+
+            {/* Summary Cards */}
             <SummaryCards data={parsedData} />
 
-            {activeTab === "overview" && (
-              <ProtocolChart
-                protocols={parsedData.protocols}
-                devices={parsedData.devices}
-                trafficTypes={parsedData.trafficTypes}
-              />
+            {/* Critical Alerts Strip */}
+            {criticalAlerts.length > 0 && (
+              <div className="bg-red-900/20 border border-red-800/40
+              rounded-2xl p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <AlertTriangle className="w-4 h-4 text-red-400" />
+                  <span className="text-red-400 font-semibold text-sm">
+                    Security Threats Detected
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {criticalAlerts.map((alert, i) => (
+                    <div key={i} className="flex items-start gap-3
+                    bg-red-900/20 rounded-xl p-3">
+                      <span className="text-lg">{alert.icon}</span>
+                      <div>
+                        <div className="text-white text-xs font-medium">
+                          {alert.title}
+                        </div>
+                        <div className="text-slate-400 text-xs mt-0.5">
+                          {alert.detail}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
 
-            {activeTab === "devices" && (
-              <DeviceTable devices={parsedData.devices} />
-            )}
+            {/* Charts + Privacy Report side by side */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2">
+                <ProtocolChart
+                  protocols={parsedData.protocols}
+                  devices={parsedData.devices}
+                  trafficTypes={parsedData.trafficTypes}
+                />
+              </div>
+              <div className="lg:col-span-1 min-h-[400px]">
+                <PrivacyReport trackers={parsedData.trackers} />
+              </div>
+            </div>
 
-            {activeTab === "websites" && (
-              <WebsitesTab
-                websites={parsedData.websites}
-                trackers={parsedData.trackers}
-              />
-            )}
+            {/* Device Table */}
+            <DeviceTable devices={parsedData.devices} />
 
-            {activeTab === "security" && (
-              <SecurityTab
-                alerts={parsedData.security}
-                retransmissions={parsedData.retransmissions}
-                avgRtt={parsedData.avgRtt}
-                nxdomainCount={parsedData.nxdomainCount}
-              />
-            )}
+            {/* Websites + Trackers */}
+            <WebsitesTab
+              websites={parsedData.websites}
+              trackers={parsedData.trackers}
+            />
+
+            {/* Full Security Report */}
+            <SecurityTab
+              alerts={parsedData.security}
+              retransmissions={parsedData.retransmissions}
+              avgRtt={parsedData.avgRtt}
+              nxdomainCount={parsedData.nxdomainCount}
+            />
+
           </div>
         )}
       </main>
 
       <div className="text-center text-slate-700 text-xs py-6">
-        SniffPal — Open Source Network Intelligence
+        SniffPal v1.0.5 — Open Source Network Intelligence ·
+        <a
+          href="https://github.com/kannanokannan/sniffpal"
+          target="_blank"
+          rel="noreferrer"
+          className="hover:text-cyan-600 transition-colors ml-1"
+        >
+          GitHub ⭐
+        </a>
       </div>
     </div>
   );
