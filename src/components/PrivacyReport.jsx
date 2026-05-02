@@ -21,7 +21,6 @@ export default function PrivacyReport({ trackers }) {
     <div className="bg-slate-800/40 backdrop-blur-md border
     border-white/5 rounded-2xl p-6 shadow-lg h-full flex flex-col">
 
-      {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-base font-semibold text-white
         tracking-wide flex items-center gap-2">
@@ -41,7 +40,6 @@ export default function PrivacyReport({ trackers }) {
         during this capture.
       </p>
 
-      {/* Tracker List */}
       <div className="overflow-y-auto flex-1 space-y-2">
         {trackers.map((tracker, i) => (
           <div key={i}

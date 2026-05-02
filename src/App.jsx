@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import FileUpload from './components/FileUpload';
 import DeviceTable from './components/DeviceTable';
 import ProtocolChart from './components/ProtocolChart';
@@ -6,25 +6,59 @@ import SummaryCards from './components/SummaryCards';
 import WebsitesTab from './components/WebsitesTab';
 import SecurityTab from './components/SecurityTab';
 import PrivacyReport from './components/PrivacyReport';
-import { parseWiresharkJSON } from './utils/parser';
-import { Activity, AlertTriangle } from 'lucide-react';
+import { Activity, AlertTriangle, Cpu } from 'lucide-react';
 
 export default function App() {
   const [parsedData, setParsedData] = useState(null);
+  const [progress, setProgress] = useState(null);
+  // progress = { value: 0-100, label: string } | null
 
-  function handleFile(file) {
+  const handleFile = useCallback((file) => {
+    setParsedData(null);
+    setProgress({ value: 0, label: "Reading file..." });
+
     const reader = new FileReader();
+
     reader.onload = (e) => {
-      try {
-        const json = JSON.parse(e.target.result);
-        const data = parseWiresharkJSON(json);
-        setParsedData(data);
-      } catch {
-        alert("Invalid file! Export from Wireshark as JSON.");
-      }
+      const text = e.target.result;
+
+      // ── Spawn Web Worker ──────────────────────────
+      const worker = new Worker(
+        new URL('./workers/parser.worker.js', import.meta.url),
+        { type: 'module' }
+      );
+
+      worker.postMessage({ text, fileSize: file.size });
+
+      worker.onmessage = (msg) => {
+        const { type, value, label, data, message } = msg.data;
+
+        if (type === 'progress') {
+          setProgress({ value, label });
+        }
+
+        if (type === 'result') {
+          setParsedData(data);
+          setProgress(null);
+          worker.terminate();
+        }
+
+        if (type === 'error') {
+          alert(message);
+          setProgress(null);
+          worker.terminate();
+        }
+      };
+
+      worker.onerror = (err) => {
+        alert("Worker error: " + err.message);
+        setProgress(null);
+        worker.terminate();
+      };
     };
+
     reader.readAsText(file);
-  }
+  }, []);
 
   const criticalAlerts = parsedData?.security?.filter(
     a => a.severity === "critical"
@@ -55,12 +89,24 @@ export default function App() {
                 SniffPal
               </h1>
               <p className="text-slate-500 text-xs">
-                Network Intelligence Tool · v1.0.5
+                Network Intelligence Tool · v1.1.0
               </p>
             </div>
           </div>
+
           {parsedData && (
             <div className="flex items-center gap-4">
+              {parsedData.sampled && (
+                <div className="flex items-center gap-2
+                bg-yellow-900/30 border border-yellow-800/50
+                px-3 py-1.5 rounded-full">
+                  <Cpu className="w-3.5 h-3.5 text-yellow-400" />
+                  <span className="text-yellow-400 text-xs font-medium">
+                    Sampled {parsedData.processedPackets.toLocaleString()}
+                    /{parsedData.totalPackets.toLocaleString()} packets
+                  </span>
+                </div>
+              )}
               {criticalAlerts.length > 0 && (
                 <div className="flex items-center gap-2
                 bg-red-900/30 border border-red-800/50
@@ -73,7 +119,7 @@ export default function App() {
               )}
               <span className="text-slate-500 text-xs">
                 {parsedData.totalPackets.toLocaleString()} packets
-                · {parsedData.totalMB} MB
+                · {parsedData.fileSizeMB} MB file
               </span>
               <button
                 onClick={() => setParsedData(null)}
@@ -89,9 +135,46 @@ export default function App() {
 
       {/* Main */}
       <main className="max-w-7xl mx-auto px-6 py-8 relative z-10">
-        {!parsedData ? (
 
-          /* Upload Screen */
+        {/* ── Progress Screen ─────────────────────── */}
+        {progress && (
+          <div className="flex flex-col items-center
+          justify-center min-h-[75vh] gap-6">
+            <div className="text-center">
+              <div className="text-5xl mb-4">🔍</div>
+              <h2 className="text-xl font-bold text-white mb-1">
+                Analysing Your Capture
+              </h2>
+              <p className="text-slate-400 text-sm">
+                Running in background — UI stays responsive
+              </p>
+            </div>
+
+            {/* Progress Bar */}
+            <div className="w-full max-w-md">
+              <div className="flex justify-between text-xs
+              text-slate-400 mb-2">
+                <span>{progress.label}</span>
+                <span>{progress.value}%</span>
+              </div>
+              <div className="w-full bg-slate-800 rounded-full h-2">
+                <div
+                  className="bg-gradient-to-r from-cyan-500
+                  to-blue-500 h-2 rounded-full transition-all
+                  duration-300"
+                  style={{ width: `${progress.value}%` }}
+                />
+              </div>
+              <p className="text-slate-600 text-xs mt-3 text-center">
+                Large files are sampled intelligently —
+                first 25,000 packets analysed
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Upload Screen ───────────────────────── */}
+        {!parsedData && !progress && (
           <div className="flex flex-col items-center
           justify-center min-h-[75vh]">
             <div className="text-center mb-8">
@@ -100,9 +183,9 @@ export default function App() {
               </h2>
               <p className="text-slate-400 text-sm max-w-md mx-auto">
                 Like Chrome DevTools — but for your entire network.
-                Drop a Wireshark file and see every device,
-                website, tracker, and security alert instantly.
-                <span className="text-green-400"> 100% local.</span>
+                Drop any size Wireshark file. Processed locally,
+                never uploaded.
+                <span className="text-green-400"> 100% private.</span>
               </p>
               <div className="flex items-center justify-center
               gap-6 mt-4 text-xs text-slate-500">
@@ -110,6 +193,7 @@ export default function App() {
                 <span>🌐 Websites</span>
                 <span>👁️ Trackers</span>
                 <span>⚠️ Security</span>
+                <span>🔥 500MB+ support</span>
               </div>
             </div>
             <FileUpload onFile={handleFile} />
@@ -117,19 +201,41 @@ export default function App() {
               Wireshark: File → Export Packet Dissections → As JSON
             </p>
           </div>
+        )}
 
-        ) : (
-
-          /* Dashboard */
+        {/* ── Dashboard ───────────────────────────── */}
+        {parsedData && !progress && (
           <div className="space-y-6">
+
+            {/* Sampling notice */}
+            {parsedData.sampled && (
+              <div className="bg-yellow-900/20 border
+              border-yellow-800/40 rounded-2xl p-4 flex
+              items-start gap-3">
+                <Cpu className="w-5 h-5 text-yellow-400
+                flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-yellow-400 font-medium text-sm">
+                    Large File — Intelligent Sampling Applied
+                  </p>
+                  <p className="text-slate-400 text-xs mt-0.5">
+                    File size: {parsedData.fileSizeMB} MB ·
+                    Total packets: {parsedData.totalPackets.toLocaleString()} ·
+                    Analysed: {parsedData.processedPackets.toLocaleString()} evenly
+                    sampled packets across entire capture.
+                    Results are statistically representative.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Summary Cards */}
             <SummaryCards data={parsedData} />
 
             {/* Critical Alerts Strip */}
             {criticalAlerts.length > 0 && (
-              <div className="bg-red-900/20 border border-red-800/40
-              rounded-2xl p-4">
+              <div className="bg-red-900/20 border
+              border-red-800/40 rounded-2xl p-4">
                 <div className="flex items-center gap-2 mb-3">
                   <AlertTriangle className="w-4 h-4 text-red-400" />
                   <span className="text-red-400 font-semibold text-sm">
@@ -155,7 +261,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Charts + Privacy Report side by side */}
+            {/* Charts + Privacy side by side */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2">
                 <ProtocolChart
@@ -169,16 +275,16 @@ export default function App() {
               </div>
             </div>
 
-            {/* Device Table */}
+            {/* Devices */}
             <DeviceTable devices={parsedData.devices} />
 
-            {/* Websites + Trackers */}
+            {/* Websites */}
             <WebsitesTab
               websites={parsedData.websites}
               trackers={parsedData.trackers}
             />
 
-            {/* Full Security Report */}
+            {/* Security */}
             <SecurityTab
               alerts={parsedData.security}
               retransmissions={parsedData.retransmissions}
@@ -191,7 +297,7 @@ export default function App() {
       </main>
 
       <div className="text-center text-slate-700 text-xs py-6">
-        SniffPal v1.0.5 — Open Source Network Intelligence ·
+        SniffPal v1.1.0 — Open Source Network Intelligence ·
         <a
           href="https://github.com/kannanokannan/sniffpal"
           target="_blank"
