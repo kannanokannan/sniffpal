@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+sampledump/ 
+node_modules/ 
+dist/ 
