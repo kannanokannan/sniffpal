@@ -34,12 +34,10 @@ please report it responsibly.
 
 ### How to Report
 
-Email: security@sniffpal.dev *(monitored by maintainer)*
-
-Or use GitHub's private vulnerability reporting:
+Use GitHub's private vulnerability reporting (preferred):
 - Go to the **Security** tab on this repo
 - Click **"Report a vulnerability"**
-- Fill in the details
+- Fill in the details privately
 
 ### What to Include
 
