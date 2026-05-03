@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import FileUpload from './components/FileUpload';
 import DeviceTable from './components/DeviceTable';
 import ProtocolChart from './components/ProtocolChart';
@@ -6,23 +6,52 @@ import SummaryCards from './components/SummaryCards';
 import WebsitesTab from './components/WebsitesTab';
 import SecurityTab from './components/SecurityTab';
 import PrivacyReport from './components/PrivacyReport';
-import { Activity, AlertTriangle, Cpu } from 'lucide-react';
+import HealthScore from './components/HealthScore';
+import DataPanel from './components/DataPanel';
+import { saveSession, loadSession, clearSession, timeAgo } from './utils/useSession';
+import { calculateHealthScore } from './utils/healthScore';
+import { Activity, AlertTriangle, Cpu, Clock } from 'lucide-react';
 
 export default function App() {
   const [parsedData, setParsedData] = useState(null);
   const [progress, setProgress] = useState(null);
-  // progress = { value: 0-100, label: string } | null
+  const [trustedDevices, setTrustedDevices] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('sniffpal_trusted') || '[]');
+    } catch { return []; }
+  });
+  const [selectedDataPoint, setSelectedDataPoint] = useState(null);
+  const [resumeSession, setResumeSession] = useState(null);
+  const [healthScore, setHealthScore] = useState(null);
 
+  // ── Load saved session on startup ─────────────────
+  useEffect(() => {
+    loadSession().then(session => {
+      if (session) setResumeSession(session);
+    });
+  }, []);
+
+  // ── Trust device toggle ───────────────────────────
+  const handleTrust = useCallback((mac) => {
+    setTrustedDevices(prev => {
+      const updated = prev.includes(mac)
+        ? prev.filter(m => m !== mac)
+        : [...prev, mac];
+      localStorage.setItem('sniffpal_trusted', JSON.stringify(updated));
+      return updated;
+    });
+  }, []);
+
+  // ── Handle file parse ─────────────────────────────
   const handleFile = useCallback((file) => {
     setParsedData(null);
-    setProgress({ value: 0, label: "Reading file..." });
+    setResumeSession(null);
+    setSelectedDataPoint(null);
+    setProgress({ value: 0, label: 'Reading file...' });
 
     const reader = new FileReader();
-
     reader.onload = (e) => {
       const text = e.target.result;
-
-      // ── Spawn Web Worker ──────────────────────────
       const worker = new Worker(
         new URL('./workers/parser.worker.js', import.meta.url),
         { type: 'module' }
@@ -32,17 +61,15 @@ export default function App() {
 
       worker.onmessage = (msg) => {
         const { type, value, label, data, message } = msg.data;
-
-        if (type === 'progress') {
-          setProgress({ value, label });
-        }
-
+        if (type === 'progress') setProgress({ value, label });
         if (type === 'result') {
+          const score = calculateHealthScore(data);
           setParsedData(data);
+          setHealthScore(score);
           setProgress(null);
+          saveSession(data, file.name);
           worker.terminate();
         }
-
         if (type === 'error') {
           alert(message);
           setProgress(null);
@@ -51,17 +78,31 @@ export default function App() {
       };
 
       worker.onerror = (err) => {
-        alert("Worker error: " + err.message);
+        alert('Worker error: ' + err.message);
         setProgress(null);
         worker.terminate();
       };
     };
-
     reader.readAsText(file);
   }, []);
 
+  // ── Resume session ────────────────────────────────
+  const handleResume = useCallback(() => {
+    if (resumeSession) {
+      const score = calculateHealthScore(resumeSession.data);
+      setParsedData(resumeSession.data);
+      setHealthScore(score);
+      setResumeSession(null);
+    }
+  }, [resumeSession]);
+
+  const handleClearSession = useCallback(() => {
+    clearSession();
+    setResumeSession(null);
+  }, []);
+
   const criticalAlerts = parsedData?.security?.filter(
-    a => a.severity === "critical"
+    a => a.severity === 'critical'
   ) || [];
 
   return (
@@ -75,8 +116,8 @@ export default function App() {
       bg-blue-600/10 rounded-full blur-[128px] pointer-events-none"/>
 
       {/* Header */}
-      <header className="bg-slate-900/50 backdrop-blur-lg border-b
-      border-white/5 sticky top-0 z-20">
+      <header className="bg-slate-900/50 backdrop-blur-lg
+      border-b border-white/5 sticky top-0 z-20">
         <div className="max-w-7xl mx-auto px-6 py-4 flex
         items-center justify-between">
           <div className="flex items-center gap-3">
@@ -89,21 +130,21 @@ export default function App() {
                 SniffPal
               </h1>
               <p className="text-slate-500 text-xs">
-                Network Intelligence Tool · v1.1.0
+                Network Intelligence · v2.0
               </p>
             </div>
           </div>
 
           {parsedData && (
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3 flex-wrap justify-end">
               {parsedData.sampled && (
                 <div className="flex items-center gap-2
                 bg-yellow-900/30 border border-yellow-800/50
                 px-3 py-1.5 rounded-full">
                   <Cpu className="w-3.5 h-3.5 text-yellow-400" />
                   <span className="text-yellow-400 text-xs font-medium">
-                    Sampled {parsedData.processedPackets.toLocaleString()}
-                    /{parsedData.totalPackets.toLocaleString()} packets
+                    Sampled {parsedData.processedPackets?.toLocaleString()}
+                    /{parsedData.totalPackets?.toLocaleString()}
                   </span>
                 </div>
               )}
@@ -113,16 +154,35 @@ export default function App() {
                 px-3 py-1.5 rounded-full">
                   <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
                   <span className="text-red-400 text-xs font-medium">
-                    {criticalAlerts.length} threat{criticalAlerts.length > 1 ? "s" : ""} detected
+                    {criticalAlerts.length} threat{criticalAlerts.length > 1 ? 's' : ''}
                   </span>
                 </div>
               )}
-              <span className="text-slate-500 text-xs">
-                {parsedData.totalPackets.toLocaleString()} packets
-                · {parsedData.fileSizeMB} MB file
+              {healthScore && (
+                <div className={`flex items-center gap-2
+                px-3 py-1.5 rounded-full border
+                ${healthScore.score >= 80
+                  ? 'bg-green-900/30 border-green-800/50'
+                  : healthScore.score >= 60
+                  ? 'bg-yellow-900/30 border-yellow-800/50'
+                  : 'bg-red-900/30 border-red-800/50'
+                }`}>
+                  <span className={`text-xs font-bold
+                  ${healthScore.color}`}>
+                    {healthScore.grade} · {healthScore.score}/100
+                  </span>
+                </div>
+              )}
+              <span className="text-slate-500 text-xs hidden md:block">
+                {parsedData.totalPackets?.toLocaleString()} pkts
+                · {parsedData.fileSizeMB} MB
               </span>
               <button
-                onClick={() => setParsedData(null)}
+                onClick={() => {
+                  setParsedData(null);
+                  setSelectedDataPoint(null);
+                  setHealthScore(null);
+                }}
                 className="text-sm text-slate-400
                 hover:text-cyan-400 transition-all"
               >
@@ -136,7 +196,7 @@ export default function App() {
       {/* Main */}
       <main className="max-w-7xl mx-auto px-6 py-8 relative z-10">
 
-        {/* ── Progress Screen ─────────────────────── */}
+        {/* ── Progress ────────────────────────────── */}
         {progress && (
           <div className="flex flex-col items-center
           justify-center min-h-[75vh] gap-6">
@@ -149,8 +209,6 @@ export default function App() {
                 Running in background — UI stays responsive
               </p>
             </div>
-
-            {/* Progress Bar */}
             <div className="w-full max-w-md">
               <div className="flex justify-between text-xs
               text-slate-400 mb-2">
@@ -160,40 +218,81 @@ export default function App() {
               <div className="w-full bg-slate-800 rounded-full h-2">
                 <div
                   className="bg-gradient-to-r from-cyan-500
-                  to-blue-500 h-2 rounded-full transition-all
-                  duration-300"
+                  to-blue-500 h-2 rounded-full transition-all duration-300"
                   style={{ width: `${progress.value}%` }}
                 />
               </div>
               <p className="text-slate-600 text-xs mt-3 text-center">
-                Large files are sampled intelligently —
-                first 25,000 packets analysed
+                Large files sampled intelligently across entire capture
               </p>
             </div>
           </div>
         )}
 
-        {/* ── Upload Screen ───────────────────────── */}
+        {/* ── Upload Screen ────────────────────────── */}
         {!parsedData && !progress && (
           <div className="flex flex-col items-center
           justify-center min-h-[75vh]">
+
+            {/* Resume Banner */}
+            {resumeSession && (
+              <div className="w-full max-w-2xl mb-6
+              bg-slate-800/60 backdrop-blur-md border
+              border-cyan-500/20 rounded-2xl p-5">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <Clock className="w-5 h-5 text-cyan-400
+                    flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-white font-medium text-sm">
+                        Resume last session?
+                      </p>
+                      <p className="text-slate-400 text-xs mt-0.5">
+                        {resumeSession.fileName} ·{' '}
+                        {resumeSession.data.totalPackets?.toLocaleString()} packets ·{' '}
+                        {timeAgo(resumeSession.savedAt)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 flex-shrink-0">
+                    <button
+                      onClick={handleResume}
+                      className="bg-cyan-600 hover:bg-cyan-500
+                      text-white text-xs px-4 py-2 rounded-xl
+                      transition-all font-medium"
+                    >
+                      Resume
+                    </button>
+                    <button
+                      onClick={handleClearSession}
+                      className="bg-slate-700 hover:bg-slate-600
+                      text-slate-300 text-xs px-4 py-2 rounded-xl
+                      transition-all"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="text-center mb-8">
               <h2 className="text-3xl font-bold text-white mb-2">
                 Your Network. Instantly Understood.
               </h2>
               <p className="text-slate-400 text-sm max-w-md mx-auto">
                 Like Chrome DevTools — but for your entire network.
-                Drop any size Wireshark file. Processed locally,
-                never uploaded.
-                <span className="text-green-400"> 100% private.</span>
+                Drop any Wireshark file. 100% local. Never uploaded.
+                <span className="text-green-400"> Zero privacy risk.</span>
               </p>
               <div className="flex items-center justify-center
-              gap-6 mt-4 text-xs text-slate-500">
+              gap-4 mt-4 text-xs text-slate-500 flex-wrap">
                 <span>📱 Devices</span>
                 <span>🌐 Websites</span>
                 <span>👁️ Trackers</span>
                 <span>⚠️ Security</span>
-                <span>🔥 500MB+ support</span>
+                <span>🏠 IoT</span>
+                <span>📊 Health Score</span>
               </div>
             </div>
             <FileUpload onFile={handleFile} />
@@ -203,15 +302,15 @@ export default function App() {
           </div>
         )}
 
-        {/* ── Dashboard ───────────────────────────── */}
+        {/* ── Dashboard ────────────────────────────── */}
         {parsedData && !progress && (
           <div className="space-y-6">
 
             {/* Sampling notice */}
             {parsedData.sampled && (
               <div className="bg-yellow-900/20 border
-              border-yellow-800/40 rounded-2xl p-4 flex
-              items-start gap-3">
+              border-yellow-800/40 rounded-2xl p-4
+              flex items-start gap-3">
                 <Cpu className="w-5 h-5 text-yellow-400
                 flex-shrink-0 mt-0.5" />
                 <div>
@@ -219,14 +318,18 @@ export default function App() {
                     Large File — Intelligent Sampling Applied
                   </p>
                   <p className="text-slate-400 text-xs mt-0.5">
-                    File size: {parsedData.fileSizeMB} MB ·
-                    Total packets: {parsedData.totalPackets.toLocaleString()} ·
-                    Analysed: {parsedData.processedPackets.toLocaleString()} evenly
-                    sampled packets across entire capture.
-                    Results are statistically representative.
+                    {parsedData.fileSizeMB} MB file ·
+                    {parsedData.totalPackets?.toLocaleString()} total packets ·
+                    Analysed {parsedData.processedPackets?.toLocaleString()} evenly
+                    sampled — results are statistically representative
                   </p>
                 </div>
               </div>
+            )}
+
+            {/* Health Score */}
+            {healthScore && (
+              <HealthScore score={healthScore} />
             )}
 
             {/* Summary Cards */}
@@ -244,8 +347,8 @@ export default function App() {
                 </div>
                 <div className="space-y-2">
                   {criticalAlerts.map((alert, i) => (
-                    <div key={i} className="flex items-start gap-3
-                    bg-red-900/20 rounded-xl p-3">
+                    <div key={i} className="flex items-start
+                    gap-3 bg-red-900/20 rounded-xl p-3">
                       <span className="text-lg">{alert.icon}</span>
                       <div>
                         <div className="text-white text-xs font-medium">
@@ -261,22 +364,37 @@ export default function App() {
               </div>
             )}
 
-            {/* Charts + Privacy side by side */}
+            {/* Charts + Privacy + Data Panel */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2">
                 <ProtocolChart
                   protocols={parsedData.protocols}
                   devices={parsedData.devices}
                   trafficTypes={parsedData.trafficTypes}
+                  onDataClick={setSelectedDataPoint}
                 />
               </div>
-              <div className="lg:col-span-1 min-h-[400px]">
+              <div className="flex flex-col gap-6">
                 <PrivacyReport trackers={parsedData.trackers} />
               </div>
             </div>
 
-            {/* Devices */}
-            <DeviceTable devices={parsedData.devices} />
+            {/* Data Panel — shows when chart clicked */}
+            {selectedDataPoint && (
+              <DataPanel
+                data={selectedDataPoint}
+                devices={parsedData.devices}
+                onClose={() => setSelectedDataPoint(null)}
+              />
+            )}
+
+            {/* Device Table */}
+            <DeviceTable
+              devices={parsedData.devices}
+              trustedDevices={trustedDevices}
+              onTrust={handleTrust}
+              onDeviceClick={setSelectedDataPoint}
+            />
 
             {/* Websites */}
             <WebsitesTab
@@ -297,7 +415,7 @@ export default function App() {
       </main>
 
       <div className="text-center text-slate-700 text-xs py-6">
-        SniffPal v1.1.0 — Open Source Network Intelligence ·
+        SniffPal v2.0 — Open Source Network Intelligence ·
         <a
           href="https://github.com/kannanokannan/sniffpal"
           target="_blank"
