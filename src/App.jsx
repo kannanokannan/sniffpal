@@ -155,7 +155,7 @@ export default function App() {
                 SniffPal
               </h1>
               <p className="text-slate-500 text-xs">
-                Network Intelligence · v2.1
+                Network Intelligence · v2.1.1.1
               </p>
             </div>
           </div>
@@ -472,7 +472,7 @@ export default function App() {
       </main>
 
       <div className="text-center text-slate-700 text-xs py-6">
-        SniffPal v2.1 — Open Source Network Intelligence ·
+        SniffPal v2.1.1 — Open Source Network Intelligence ·
         <a
           href="https://github.com/kannanokannan/sniffpal"
           target="_blank"

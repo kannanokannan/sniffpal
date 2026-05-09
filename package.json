@@ -2,7 +2,7 @@
   "homepage": "https://kannanokannan.github.io/sniffpal",
   "name": "sniffpal",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
