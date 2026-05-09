@@ -105,9 +105,17 @@ self.onmessage = async function (e) {
     // ── Step 1: Stream-parse the file ──────────────
     self.postMessage({ type: "progress", value: 5, label: "Scanning file…" });
 
+    // Detect format by magic bytes
+    const magicBuf = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    const magic32 = readU32LE(magicBuf, 0);
+    const isBinary =
+      magic32 === 0xa1b2c3d4 || magic32 === 0xd4c3b2a1 ||
+      magic32 === 0xa1b23c4d || magic32 === 0x4d3cb2a1 ||
+      magic32 === 0x0a0d0d0a; // pcapng
+
     let totalPacketCount, packets;
     try {
-      ({ totalPacketCount, packets } = await streamParsePackets(
+      ({ totalPacketCount, packets } = await (isBinary ? parsePcapBinary : streamParsePackets)(
         file,
         (pct, label) => self.postMessage({ type: "progress", value: pct, label })
       ));
@@ -117,7 +125,9 @@ self.onmessage = async function (e) {
     }
 
     if (totalPacketCount === 0) {
-      self.postMessage({ type: "error", message: "No packets found. Please export from Wireshark as JSON (File → Export Packet Dissections → As JSON)." });
+      self.postMessage({ type: "error", message: isBinary
+        ? "No packets found in pcap file. The capture may be empty."
+        : "No packets found. Please export from Wireshark as JSON (File → Export Packet Dissections → As JSON)." });
       return;
     }
 
@@ -361,7 +371,9 @@ self.onmessage = async function (e) {
             mac, packets: 0, bytes: 0, vendor,
             icon: getDeviceIcon(vendor),
             nickname: getNickname(vendor),
+            type: 'unknown',
             ip: null, hostname: null, trafficTypes: {},
+            seenPorts: new Set(),
           };
         }
         devices[mac].packets++;
@@ -372,6 +384,8 @@ self.onmessage = async function (e) {
         if (trafficType) {
           devices[mac].trafficTypes[trafficType] = (devices[mac].trafficTypes[trafficType] || 0) + 1;
         }
+        if (srcPort) devices[mac].seenPorts.add(srcPort);
+        if (dstPort) devices[mac].seenPorts.add(dstPort);
       });
 
       // ── v2.1: Capture timestamp ────────────────────
@@ -577,11 +591,15 @@ self.onmessage = async function (e) {
     }
 
     // ── Final assembly ──────────────────────────────
-    const deviceList = Object.values(devices).map(d => ({
-      ...d,
-      topTraffic: getTopTraffic(d.trafficTypes),
-      bandwidthMB: (d.bytes / 1024 / 1024).toFixed(2),
-    })).sort((a, b) => b.packets - a.packets);
+    const deviceList = Object.values(devices).map(d => {
+      refineDeviceType(d, d.seenPorts);
+      const { seenPorts, ...rest } = d; // strip Set before postMessage
+      return {
+        ...rest,
+        topTraffic: getTopTraffic(d.trafficTypes),
+        bandwidthMB: (d.bytes / 1024 / 1024).toFixed(2),
+      };
+    }).sort((a, b) => b.packets - a.packets);
 
     const allSites = { ...sniSites };
     Object.values(dnsQueries).forEach(dns => {
@@ -749,7 +767,65 @@ function getDeviceIcon(vendor) {
   if (vendor.includes("VMware"))    return "💻";
   if (vendor.includes("Philips"))   return "💡";
   if (vendor.includes("Nest"))      return "🏠";
+  if (vendor.includes("Hikvision") || vendor.includes("Dahua") || vendor.includes("Axis")) return "📷";
+  if (vendor.includes("Sonos"))     return "🔊";
+  if (vendor.includes("Synology") || vendor.includes("QNAP") || vendor.includes("Western Digital")) return "🖥️";
+  if (vendor.includes("Sony") || vendor.includes("Nintendo") || vendor.includes("Xbox")) return "🎮";
   return "🖥️";
+}
+
+// Refine device icon and type based on observed ports
+function refineDeviceType(device, seenPorts) {
+  const ports = seenPorts || new Set();
+
+  // Camera: RTSP (554, 8554) + common camera vendors
+  if (ports.has(554) || ports.has(8554)) {
+    device.icon = '📷'; device.type = 'camera';
+    if (!device.nickname || device.nickname === 'Unknown Device') device.nickname = 'IP Camera';
+    return;
+  }
+  // Baby monitor: typically RTSP + specific vendor patterns
+  if ((ports.has(554) || ports.has(8554)) && device.vendor.toLowerCase().includes('infant')) {
+    device.icon = '👶'; device.type = 'baby_monitor';
+    device.nickname = 'Baby Monitor';
+    return;
+  }
+  // Smart doorbell: HTTP + 443 + Nest/Ring/Arlo
+  if (['Ring', 'Arlo', 'Nest'].some(v => device.vendor.includes(v)) && (ports.has(80) || ports.has(443))) {
+    device.icon = '🔔'; device.type = 'doorbell';
+    device.nickname = 'Smart Doorbell';
+    return;
+  }
+  // Smart bulb: port 56700 (Lifx), 1900 (UPnP Hue)
+  if (ports.has(56700) || device.vendor.includes('Philips') || device.vendor.includes('Lifx') || device.vendor.includes('LIFX')) {
+    device.icon = '💡'; device.type = 'smart_bulb';
+    device.nickname = 'Smart Bulb';
+    return;
+  }
+  // Smart speaker: Sonos (1400), Alexa/Echo (Amazon)
+  if (ports.has(1400) || device.vendor.includes('Sonos')) {
+    device.icon = '🔊'; device.type = 'smart_speaker';
+    device.nickname = 'Smart Speaker';
+    return;
+  }
+  if (device.vendor.includes('Amazon') && (ports.has(4070) || ports.has(8080))) {
+    device.icon = '🔊'; device.type = 'smart_speaker';
+    device.nickname = 'Amazon Echo';
+    return;
+  }
+  // NAS / Server: SMB (445), NFS (2049), Samba
+  if (ports.has(445) || ports.has(2049) || ports.has(548)) {
+    device.icon = '🖥️'; device.type = 'nas';
+    if (!device.nickname || device.nickname === 'Unknown Device') device.nickname = 'NAS / Server';
+    return;
+  }
+  // Gaming console: common game ports
+  if (ports.has(3074) || ports.has(3478) || ports.has(3479)) {
+    if (device.vendor.includes('Sony')) { device.icon = '🎮'; device.type = 'console'; device.nickname = 'PlayStation'; return; }
+    if (device.vendor.includes('Nintendo')) { device.icon = '🎮'; device.type = 'console'; device.nickname = 'Nintendo Switch'; return; }
+    device.icon = '🎮'; device.type = 'console';
+    if (!device.nickname || device.nickname === 'Unknown Device') device.nickname = 'Gaming Console';
+  }
 }
 
 function getNickname(vendor) {
@@ -764,4 +840,316 @@ function getNickname(vendor) {
   if (vendor.includes("Nest"))      return "Smart Home Hub";
   if (vendor.includes("Philips"))   return "Smart Light";
   return "Unknown Device";
+}
+
+// ── Binary helper readers (avoid DataView byteOffset confusion) ────────────
+function readU32LE(b, o) { return (b[o] | b[o+1]<<8 | b[o+2]<<16 | b[o+3]<<24) >>> 0; }
+function readU32BE(b, o) { return (b[o]<<24 | b[o+1]<<16 | b[o+2]<<8 | b[o+3]) >>> 0; }
+function readU16LE(b, o) { return  b[o] | b[o+1]<<8; }
+function readU16BE(b, o) { return (b[o]<<8) | b[o+1]; }
+
+function fmtMac(d, o) {
+  return [d[o],d[o+1],d[o+2],d[o+3],d[o+4],d[o+5]]
+    .map(v => v.toString(16).padStart(2,'0')).join(':');
+}
+function fmtIpv4(d, o) { return `${d[o]}.${d[o+1]}.${d[o+2]}.${d[o+3]}`; }
+function fmtIpv6(d, o) {
+  const g = [];
+  for (let i = 0; i < 16; i += 2)
+    g.push(((d[o+i]<<8)|d[o+i+1]).toString(16));
+  return g.join(':');
+}
+
+// ── Build a synthetic Wireshark-like layers object from raw bytes ──────────
+function buildLayers(data, linkType, timeEpoch, origLen) {
+  const layers = {
+    frame: {
+      'frame.len': String(origLen),
+      'frame.time_epoch': String(timeEpoch),
+    },
+  };
+
+  if (linkType !== 1) return layers; // only Ethernet
+  if (data.length < 14) return layers;
+
+  layers.eth = { 'eth.src': fmtMac(data, 6), 'eth.dst': fmtMac(data, 0) };
+
+  let ipOff = 14;
+  let et = (data[12] << 8) | data[13];
+  if (et === 0x8100) { // 802.1Q VLAN
+    if (data.length < 18) return layers;
+    et = (data[16] << 8) | data[17];
+    ipOff = 18;
+  }
+
+  if (et === 0x0806) { // ARP
+    if (data.length < ipOff + 28) return layers;
+    layers.arp = {
+      'arp.opcode': String((data[ipOff+6]<<8)|data[ipOff+7]),
+      'arp.src.hw_mac': fmtMac(data, ipOff + 8),
+      'arp.src.proto_ipv4': fmtIpv4(data, ipOff + 14),
+    };
+    return layers;
+  }
+
+  if (et === 0x0800) { // IPv4
+    if (data.length < ipOff + 20) return layers;
+    const ihl = (data[ipOff] & 0x0f) * 4;
+    layers.ip = { 'ip.src': fmtIpv4(data, ipOff+12), 'ip.dst': fmtIpv4(data, ipOff+16) };
+    addTransportLayer(data, ipOff + ihl, data[ipOff+9], layers);
+    return layers;
+  }
+
+  if (et === 0x86dd) { // IPv6
+    if (data.length < ipOff + 40) return layers;
+    layers.ipv6 = { 'ipv6.src': fmtIpv6(data, ipOff+8), 'ipv6.dst': fmtIpv6(data, ipOff+24) };
+    addTransportLayer(data, ipOff + 40, data[ipOff+6], layers);
+    return layers;
+  }
+
+  return layers;
+}
+
+function addTransportLayer(data, off, proto, layers) {
+  if (proto === 6) { // TCP
+    if (data.length < off + 20) return;
+    const sp = (data[off]<<8)|data[off+1];
+    const dp = (data[off+2]<<8)|data[off+3];
+    layers.tcp = { 'tcp.srcport': String(sp), 'tcp.dstport': String(dp) };
+    if (sp===443||dp===443||sp===8443||dp===8443) layers.tls = {};
+    if (sp===80||dp===80) layers.http = {};
+
+  } else if (proto === 17) { // UDP
+    if (data.length < off + 8) return;
+    const sp = (data[off]<<8)|data[off+1];
+    const dp = (data[off+2]<<8)|data[off+3];
+    layers.udp = { 'udp.srcport': String(sp), 'udp.dstport': String(dp) };
+    if (sp===53||dp===53) addDnsLayer(data, off+8, layers);
+    if (sp===67||dp===67||sp===68||dp===68) addDhcpLayer(data, off+8, layers);
+
+  } else if (proto === 1) { // ICMP
+    if (data.length < off + 2) return;
+    layers.icmp = { 'icmp.type': String(data[off]), 'icmp.code': String(data[off+1]) };
+  }
+}
+
+function addDnsLayer(data, off, layers) {
+  if (data.length < off + 12) return;
+  const flags  = (data[off+2]<<8)|data[off+3];
+  const qdcnt  = (data[off+4]<<8)|data[off+5];
+  if (!qdcnt) return;
+
+  let pos = off + 12;
+  const parts = [];
+  while (pos < data.length && data[pos] !== 0 && parts.length < 20) {
+    if ((data[pos] & 0xc0) === 0xc0) break; // pointer
+    const len = data[pos++];
+    if (!len || pos + len > data.length) break;
+    let label = '';
+    for (let i = 0; i < len; i++) label += String.fromCharCode(data[pos + i]);
+    parts.push(label);
+    pos += len;
+  }
+  if (!parts.length) return;
+
+  layers.dns = {
+    'dns.qry.name': parts.join('.'),
+    'dns.flags.response': String((flags >> 15) & 1),
+    'dns.flags.rcode': String(flags & 0x0f),
+  };
+}
+
+function addDhcpLayer(data, off, layers) {
+  if (data.length < off + 240) return;
+  // Verify magic cookie at offset 236
+  if (data[off+236]!==99||data[off+237]!==130||data[off+238]!==83||data[off+239]!==99) return;
+
+  let pos = off + 240;
+  let msgType = null, hostname = null;
+  while (pos + 1 < data.length) {
+    const code = data[pos++];
+    if (code === 255) break;
+    if (code === 0)   continue;
+    const len = data[pos++];
+    if (pos + len > data.length) break;
+    if (code === 53 && len === 1) msgType = String(data[pos]);
+    if (code === 12) {
+      let h = '';
+      for (let i = 0; i < len; i++) if (data[pos+i] > 31) h += String.fromCharCode(data[pos+i]);
+      hostname = h || null;
+    }
+    pos += len;
+  }
+
+  layers.bootp = {};
+  if (msgType)  layers.bootp['bootp.option.dhcp']     = msgType;
+  if (hostname) layers.bootp['bootp.option.hostname'] = hostname;
+}
+
+// ── Legacy pcap parser (magic 0xa1b2c3d4 / 0xd4c3b2a1 / nanosecond variants) ──
+async function parsePcapBinary(file, onProgress) {
+  const CHUNK = 16 * 1024 * 1024;
+  const totalBytes = file.size;
+
+  const hdr = new Uint8Array(await file.slice(0, 24).arrayBuffer());
+  const magic = readU32LE(hdr, 0);
+
+  if (magic === 0x0a0d0d0a) return parsePcapngBinary(file, onProgress);
+
+  let le, nano = false;
+  if      (magic === 0xa1b2c3d4) le = true;
+  else if (magic === 0xd4c3b2a1) le = false;
+  else if (magic === 0xa1b23c4d) { le = true;  nano = true; }
+  else if (magic === 0x4d3cb2a1) { le = false; nano = true; }
+  else throw new Error('Not a valid pcap file. Drop a .json file from Wireshark, or convert with tshark first.');
+
+  const rd32 = le ? readU32LE : readU32BE;
+  const network = rd32(hdr, 20);
+
+  const packets = [];
+  let totalPacketCount = 0;
+  let carry = new Uint8Array(0);
+  let fileOffset = 24;
+
+  while (fileOffset < totalBytes) {
+    const chunkEnd = Math.min(fileOffset + CHUNK, totalBytes);
+    const raw = new Uint8Array(await file.slice(fileOffset, chunkEnd).arrayBuffer());
+
+    let buf;
+    if (carry.length > 0) {
+      buf = new Uint8Array(carry.length + raw.length);
+      buf.set(carry, 0);
+      buf.set(raw, carry.length);
+    } else {
+      buf = raw;
+    }
+
+    let pos = 0;
+    while (pos + 16 <= buf.length) {
+      const tsSec  = rd32(buf, pos);
+      const tsFrac = rd32(buf, pos + 4);
+      const incLen = rd32(buf, pos + 8);
+      const oriLen = rd32(buf, pos + 12);
+
+      if (incLen > 65536) break; // corrupted record
+      if (pos + 16 + incLen > buf.length) break; // spans boundary
+
+      const timeEpoch = nano ? tsSec + tsFrac / 1e9 : tsSec + tsFrac / 1e6;
+      const pktData = buf.subarray(pos + 16, pos + 16 + incLen);
+      const layers = buildLayers(pktData, network, timeEpoch, oriLen);
+
+      totalPacketCount++;
+      if (packets.length < MAX_PACKETS) {
+        packets.push({ _source: { layers } });
+      } else {
+        const j = Math.floor(Math.random() * totalPacketCount);
+        if (j < MAX_PACKETS) packets[j] = { _source: { layers } };
+      }
+
+      pos += 16 + incLen;
+    }
+
+    carry = buf.slice(pos);
+    fileOffset = chunkEnd;
+    onProgress(
+      5 + Math.round((fileOffset / totalBytes) * 85),
+      `Parsing… ${totalPacketCount.toLocaleString()} packets`
+    );
+  }
+
+  onProgress(90, `Analysing ${packets.length.toLocaleString()} sampled packets…`);
+  return { packets, totalPacketCount };
+}
+
+// ── pcapng parser (Section Header Block magic 0x0a0d0d0a) ─────────────────
+async function parsePcapngBinary(file, onProgress) {
+  const CHUNK = 16 * 1024 * 1024;
+  const totalBytes = file.size;
+
+  const packets = [];
+  let totalPacketCount = 0;
+  let carry = new Uint8Array(0);
+  let fileOffset = 0;
+  let le = true;
+  let interfaces = [];
+  let gotSHB = false;
+
+  while (fileOffset < totalBytes) {
+    const chunkEnd = Math.min(fileOffset + CHUNK, totalBytes);
+    const raw = new Uint8Array(await file.slice(fileOffset, chunkEnd).arrayBuffer());
+
+    let buf;
+    if (carry.length > 0) {
+      buf = new Uint8Array(carry.length + raw.length);
+      buf.set(carry, 0);
+      buf.set(raw, carry.length);
+    } else {
+      buf = raw;
+    }
+
+    let pos = 0;
+    while (pos + 8 <= buf.length) {
+      const blockTypeLE = readU32LE(buf, pos);
+
+      if (!gotSHB) {
+        if (blockTypeLE !== 0x0a0d0d0a) break;
+        if (pos + 12 > buf.length) break;
+        const shbLen = readU32LE(buf, pos + 4);
+        if (pos + shbLen > buf.length) break;
+        const boMagic = readU32LE(buf, pos + 8);
+        le = (boMagic === 0x1a2b3c4d);
+        gotSHB = true;
+        pos += shbLen;
+        continue;
+      }
+
+      const rd32 = le ? readU32LE : readU32BE;
+      const rd16 = le ? readU16LE : readU16BE;
+      const bType = rd32(buf, pos);
+      const bLen  = rd32(buf, pos + 4);
+
+      if (bLen < 12 || bLen > CHUNK) break; // invalid
+      if (pos + bLen > buf.length) break;    // spans boundary
+
+      if (bType === 0x00000001) {
+        // Interface Description Block — record link type
+        interfaces.push({ linkType: rd16(buf, pos + 8), tsResol: 1000000 });
+
+      } else if (bType === 0x00000006) {
+        // Enhanced Packet Block
+        const ifaceId = rd32(buf, pos + 8);
+        const tsHigh  = rd32(buf, pos + 12);
+        const tsLow   = rd32(buf, pos + 16);
+        const captLen = rd32(buf, pos + 20);
+        const origLen = rd32(buf, pos + 24);
+
+        if (captLen <= 65536 && pos + 28 + captLen <= buf.length) {
+          const iface = interfaces[ifaceId] || { linkType: 1, tsResol: 1000000 };
+          const timeEpoch = (tsHigh * 4294967296 + tsLow) / iface.tsResol;
+          const pktData = buf.subarray(pos + 28, pos + 28 + captLen);
+          const layers = buildLayers(pktData, iface.linkType, timeEpoch, origLen);
+
+          totalPacketCount++;
+          if (packets.length < MAX_PACKETS) {
+            packets.push({ _source: { layers } });
+          } else {
+            const j = Math.floor(Math.random() * totalPacketCount);
+            if (j < MAX_PACKETS) packets[j] = { _source: { layers } };
+          }
+        }
+      }
+
+      pos += bLen;
+    }
+
+    carry = buf.slice(pos);
+    fileOffset = chunkEnd;
+    onProgress(
+      5 + Math.round((fileOffset / totalBytes) * 85),
+      `Parsing… ${totalPacketCount.toLocaleString()} packets`
+    );
+  }
+
+  onProgress(90, `Analysing ${packets.length.toLocaleString()} sampled packets…`);
+  return { packets, totalPacketCount };
 }

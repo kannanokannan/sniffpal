@@ -1,10 +1,15 @@
 export default function SecurityTab({
-  alerts, retransmissions, avgRtt, nxdomainCount
+  alerts, retransmissions, avgRtt, nxdomainCount, selfIp
 }) {
-  const criticalCount = alerts.filter(
+  const visibleAlerts = selfIp
+    ? alerts.filter(a => !a.detail?.includes(selfIp))
+    : alerts;
+  const suppressedCount = alerts.length - visibleAlerts.length;
+
+  const criticalCount = visibleAlerts.filter(
     a => a.severity === "critical"
   ).length;
-  const warningCount = alerts.filter(
+  const warningCount = visibleAlerts.filter(
     a => a.severity === "warning"
   ).length;
 
@@ -89,11 +94,17 @@ export default function SecurityTab({
           shadow-[0_0_8px_rgba(248,113,113,0.8)]"></span>
           Security Alerts
           <span className="text-slate-500 text-sm font-normal">
-            ({alerts.length} findings)
+            ({visibleAlerts.length} findings)
           </span>
         </h2>
+        {suppressedCount > 0 && (
+          <div className="mb-3 px-3 py-2 bg-blue-900/20 border border-blue-800/40
+          rounded-xl text-blue-400 text-xs">
+            🏠 {suppressedCount} alert{suppressedCount > 1 ? 's' : ''} suppressed — matched your device ({selfIp})
+          </div>
+        )}
         <div className="space-y-3">
-          {alerts.map((alert, i) => (
+          {visibleAlerts.map((alert, i) => (
             <div key={i} className={`rounded-xl p-4 border
             flex items-start gap-4 transition-all
             hover:border-white/10

@@ -30,6 +30,9 @@ export default function App() {
   const [resumeSession, setResumeSession] = useState(null);
   const [healthScore, setHealthScore] = useState(null);
   const [currentFileName, setCurrentFileName] = useState(null);
+  const [selfIp, setSelfIp] = useState(() =>
+    localStorage.getItem('sniffpal_self_ip') || null
+  );
 
   // ── Load saved session on startup ─────────────────
   useEffect(() => {
@@ -111,6 +114,12 @@ export default function App() {
     setResumeSession(null);
   }, []);
 
+  const handleSetSelf = useCallback((ip) => {
+    setSelfIp(ip);
+    if (ip) localStorage.setItem('sniffpal_self_ip', ip);
+    else localStorage.removeItem('sniffpal_self_ip');
+  }, []);
+
   const criticalAlerts = parsedData?.security?.filter(
     a => a.severity === 'critical'
   ) || [];
@@ -182,6 +191,21 @@ export default function App() {
                   ${healthScore.color}`}>
                     {healthScore.grade} · {healthScore.score}/100
                   </span>
+                </div>
+              )}
+              {selfIp && (
+                <div className="flex items-center gap-1.5
+                bg-blue-900/30 border border-blue-800/50
+                px-3 py-1.5 rounded-full">
+                  <span className="text-blue-400 text-xs font-medium">
+                    🏠 My device: {selfIp}
+                  </span>
+                  <button
+                    onClick={() => handleSetSelf(null)}
+                    className="text-blue-600 hover:text-blue-400
+                    text-xs ml-1 transition-colors"
+                    title="Clear self-device"
+                  >✕</button>
                 </div>
               )}
               <span className="text-slate-500 text-xs hidden md:block">
@@ -414,6 +438,8 @@ export default function App() {
               trustedDevices={trustedDevices}
               onTrust={handleTrust}
               onDeviceClick={setSelectedDataPoint}
+              selfIp={selfIp}
+              onSetSelf={handleSetSelf}
             />
 
             {/* Websites */}
@@ -428,6 +454,7 @@ export default function App() {
               retransmissions={parsedData.retransmissions}
               avgRtt={parsedData.avgRtt}
               nxdomainCount={parsedData.nxdomainCount}
+              selfIp={selfIp}
             />
 
           </div>

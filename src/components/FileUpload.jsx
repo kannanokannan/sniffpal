@@ -8,8 +8,11 @@ export default function FileUpload({ onFile }) {
 
   const processFile = (file) => {
     setError('');
-    if (!file.name.endsWith('.json')) {
-      setError('Please upload a Wireshark JSON export file (.json)');
+    const ok = file.name.endsWith('.json') ||
+               file.name.endsWith('.pcap') ||
+               file.name.endsWith('.pcapng');
+    if (!ok) {
+      setError('Please upload a .json, .pcap, or .pcapng file');
       return;
     }
     onFile(file);
@@ -48,10 +51,10 @@ export default function FileUpload({ onFile }) {
         </div>
 
         <h3 className="text-xl font-semibold text-white mb-1">
-          Drop your Wireshark JSON export here
+          Drop your capture file here
         </h3>
         <p className="text-slate-400 text-sm mb-3">
-          Supports captures from Wireshark, tshark, and PCAPdroid
+          Supports .pcap, .pcapng (native) and Wireshark/tshark JSON exports
         </p>
 
         {/* File size info */}
@@ -81,7 +84,7 @@ export default function FileUpload({ onFile }) {
           Browse Files
           <input
             type="file"
-            accept=".json"
+            accept=".json,.pcap,.pcapng"
             className="hidden"
             onChange={(e) => e.target.files?.length &&
               processFile(e.target.files[0])}
