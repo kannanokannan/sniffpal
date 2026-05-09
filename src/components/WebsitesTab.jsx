@@ -1,4 +1,8 @@
-export default function WebsitesTab({ websites, trackers }) {
+import { useState } from 'react';
+
+export default function WebsitesTab({ websites, trackers, selfIp, onGoToDevices }) {
+  const [hideMyTraffic, setHideMyTraffic] = useState(true);
+
   if (!websites || websites.length === 0) {
     return (
       <div className="bg-slate-800/40 backdrop-blur-md border
@@ -13,22 +17,61 @@ export default function WebsitesTab({ websites, trackers }) {
     );
   }
 
-  const categories = [...new Set(websites.map(w => w.category))];
+  // Split sites into mine vs. others
+  const mySites    = selfIp ? websites.filter(s => s.srcIps?.includes(selfIp)) : [];
+  const otherSites = selfIp ? websites.filter(s => !s.srcIps?.includes(selfIp)) : websites;
+  const visibleSites = (selfIp && hideMyTraffic) ? otherSites : websites;
+
+  const categories = [...new Set(visibleSites.map(w => w.category))];
 
   return (
     <div className="space-y-6">
 
+      {/* Self-device banner or toggle */}
+      {!selfIp ? (
+        <div className="bg-blue-900/20 border border-blue-800/40 rounded-2xl
+        px-5 py-4 flex items-center justify-between gap-4">
+          <p className="text-blue-300 text-sm">
+            ℹ️ Seeing your own browsing here? Mark your device in the Devices tab
+            to separate your traffic from other devices on the network.
+          </p>
+          {onGoToDevices && (
+            <button
+              onClick={onGoToDevices}
+              className="flex-shrink-0 text-xs bg-blue-700/50 hover:bg-blue-600/60
+              text-blue-200 px-3 py-1.5 rounded-lg transition-all"
+            >
+              Go to Devices ↓
+            </button>
+          )}
+        </div>
+      ) : mySites.length > 0 && (
+        <div className="bg-blue-900/20 border border-blue-800/40 rounded-2xl
+        px-5 py-3 flex items-center justify-between gap-4">
+          <span className="text-blue-300 text-sm">
+            🏠 {mySites.length} site{mySites.length !== 1 ? 's' : ''} hidden — your device ({selfIp})
+          </span>
+          <button
+            onClick={() => setHideMyTraffic(h => !h)}
+            className="flex-shrink-0 text-xs bg-blue-700/50 hover:bg-blue-600/60
+            text-blue-200 px-3 py-1.5 rounded-lg transition-all"
+          >
+            {hideMyTraffic ? 'Show my traffic' : 'Hide my traffic'}
+          </button>
+        </div>
+      )}
+
       {/* Category Summary */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {categories.slice(0, 4).map((cat) => {
-          const count = websites.filter(w => w.category === cat).length;
+          const count = visibleSites.filter(w => w.category === cat).length;
           return (
             <div key={cat} className="bg-slate-800/40 backdrop-blur-md
             border border-white/5 rounded-2xl p-4 text-center">
-              <div className="text-2xl mb-1">{cat.split(" ")[0]}</div>
+              <div className="text-2xl mb-1">{cat.split(' ')[0]}</div>
               <div className="text-white font-bold">{count}</div>
               <div className="text-slate-500 text-xs">
-                {cat.split(" ").slice(1).join(" ")}
+                {cat.split(' ').slice(1).join(' ')}
               </div>
             </div>
           );
@@ -44,7 +87,7 @@ export default function WebsitesTab({ websites, trackers }) {
           shadow-[0_0_8px_rgba(96,165,250,0.8)]"></span>
           Sites Visited on Your Network
           <span className="text-slate-500 text-sm font-normal ml-1">
-            ({websites.length} domains)
+            ({visibleSites.length} domains)
           </span>
         </h2>
         <div className="overflow-auto max-h-[500px]">
@@ -58,7 +101,7 @@ export default function WebsitesTab({ websites, trackers }) {
               </tr>
             </thead>
             <tbody>
-              {websites.map((site, i) => (
+              {visibleSites.map((site, i) => (
                 <tr key={i} className="border-b border-white/5
                 hover:bg-slate-700/30 transition-colors">
                   <td className="py-3 pr-4">
@@ -81,17 +124,17 @@ export default function WebsitesTab({ websites, trackers }) {
                     {site.category}
                   </td>
                   <td className="py-3 pr-4">
-                    {site.encrypted ? (
+                    {site.encrypted === true ? (
                       <span className="bg-green-900/50 text-green-400
                       text-xs px-2 py-1 rounded-full border border-green-800">
                         🔒 HTTPS
                       </span>
-                    ) : (
+                    ) : site.encrypted === false ? (
                       <span className="bg-red-900/50 text-red-400
                       text-xs px-2 py-1 rounded-full border border-red-800">
                         ⚠️ HTTP
                       </span>
-                    )}
+                    ) : null}
                   </td>
                   <td className="py-3 text-right">
                     <div className="flex items-center justify-end gap-2">
@@ -101,7 +144,7 @@ export default function WebsitesTab({ websites, trackers }) {
                           to-cyan-400 h-1.5 rounded-full"
                           style={{
                             width: `${Math.min(100,
-                              (site.count / websites[0].count) * 100)}%`
+                              (site.count / (visibleSites[0]?.count || 1)) * 100)}%`
                           }}
                         />
                       </div>
@@ -145,9 +188,7 @@ export default function WebsitesTab({ websites, trackers }) {
                     <div className="text-white text-xs font-medium">
                       {tracker.domain}
                     </div>
-                    <div className="text-slate-500 text-xs">
-                      {tracker.type}
-                    </div>
+                    <div className="text-slate-500 text-xs">{tracker.type}</div>
                   </div>
                 </div>
                 <span className="bg-red-900/40 text-red-400

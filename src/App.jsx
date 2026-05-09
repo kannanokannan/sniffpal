@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import FileUpload from './components/FileUpload';
 import DeviceTable from './components/DeviceTable';
 import ProtocolChart from './components/ProtocolChart';
@@ -33,6 +33,7 @@ export default function App() {
   const [selfIp, setSelfIp] = useState(() =>
     localStorage.getItem('sniffpal_self_ip') || null
   );
+  const deviceTableRef = useRef(null);
 
   // ── Load saved session on startup ─────────────────
   useEffect(() => {
@@ -118,6 +119,10 @@ export default function App() {
     setSelfIp(ip);
     if (ip) localStorage.setItem('sniffpal_self_ip', ip);
     else localStorage.removeItem('sniffpal_self_ip');
+  }, []);
+
+  const scrollToDevices = useCallback(() => {
+    deviceTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
 
   const criticalAlerts = parsedData?.security?.filter(
@@ -433,19 +438,23 @@ export default function App() {
             )}
 
             {/* Device Table */}
-            <DeviceTable
-              devices={parsedData.devices}
-              trustedDevices={trustedDevices}
-              onTrust={handleTrust}
-              onDeviceClick={setSelectedDataPoint}
-              selfIp={selfIp}
-              onSetSelf={handleSetSelf}
-            />
+            <div ref={deviceTableRef}>
+              <DeviceTable
+                devices={parsedData.devices}
+                trustedDevices={trustedDevices}
+                onTrust={handleTrust}
+                onDeviceClick={setSelectedDataPoint}
+                selfIp={selfIp}
+                onSetSelf={handleSetSelf}
+              />
+            </div>
 
             {/* Websites */}
             <WebsitesTab
               websites={parsedData.websites}
               trackers={parsedData.trackers}
+              selfIp={selfIp}
+              onGoToDevices={scrollToDevices}
             />
 
             {/* Security */}
@@ -455,6 +464,7 @@ export default function App() {
               avgRtt={parsedData.avgRtt}
               nxdomainCount={parsedData.nxdomainCount}
               selfIp={selfIp}
+              onGoToDevices={scrollToDevices}
             />
 
           </div>

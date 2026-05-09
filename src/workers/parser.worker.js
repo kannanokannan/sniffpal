@@ -172,6 +172,13 @@ self.onmessage = async function (e) {
       const frameLen = parseInt(layers?.frame?.["frame.len"] || 0);
       totalBytes += frameLen;
 
+      // Extract addressing once — reused by DNS/SNI/HTTP/Devices/IoT sections
+      const srcMac  = layers?.eth?.["eth.src"] || null;
+      const dstMac  = layers?.eth?.["eth.dst"] || null;
+      const srcIp   = layers?.ip?.["ip.src"]   || layers?.ipv6?.["ipv6.src"] || null;
+      const dstIp   = layers?.ip?.["ip.dst"]   || layers?.ipv6?.["ipv6.dst"] || null;
+      const hostname = layers?.bootp?.["bootp.option.hostname"] || layers?.dhcp?.["dhcp.option.hostname"] || null;
+
       // ── DNS ────────────────────────────────────────
       if (layers?.dns) {
         const query = layers.dns?.["dns.qry.name"];
@@ -184,9 +191,11 @@ self.onmessage = async function (e) {
               domain, count: 0, failed: 0,
               icon: getSiteIcon(domain),
               category: getSiteCategory(domain),
+              srcIps: new Set(),
             };
           }
           dnsQueries[domain].count++;
+          if (srcIp) dnsQueries[domain].srcIps.add(srcIp);
           if (isResponse === "1" && rcode === "3") {
             dnsQueries[domain].failed++;
             nxdomainCount++;
@@ -205,9 +214,11 @@ self.onmessage = async function (e) {
             domain, count: 0, encrypted: true,
             icon: getSiteIcon(domain),
             category: getSiteCategory(domain),
+            srcIps: new Set(),
           };
         }
         sniSites[domain].count++;
+        if (srcIp) sniSites[domain].srcIps.add(srcIp);
       }
 
       // ── Tracker Detection ──────────────────────────
@@ -240,9 +251,11 @@ self.onmessage = async function (e) {
               domain, count: 0, encrypted: false,
               icon: getSiteIcon(domain),
               category: getSiteCategory(domain),
+              srcIps: new Set(),
             };
           }
           sniSites[domain].count++;
+          if (srcIp) sniSites[domain].srcIps.add(srcIp);
         }
 
         if (authHeader) {
@@ -356,11 +369,6 @@ self.onmessage = async function (e) {
       }
 
       // ── Devices ────────────────────────────────────
-      const srcMac = layers?.eth?.["eth.src"] || null;
-      const dstMac = layers?.eth?.["eth.dst"] || null;
-      const srcIp = layers?.ip?.["ip.src"] || layers?.ipv6?.["ipv6.src"] || null;
-      const dstIp = layers?.ip?.["ip.dst"] || layers?.ipv6?.["ipv6.dst"] || null;
-      const hostname = layers?.bootp?.["bootp.option.hostname"] || layers?.dhcp?.["dhcp.option.hostname"] || null;
 
       [srcMac, dstMac].forEach((mac, idx) => {
         if (!mac || !MAC_RE.test(mac)) return;
@@ -604,19 +612,26 @@ self.onmessage = async function (e) {
     const allSites = { ...sniSites };
     Object.values(dnsQueries).forEach(dns => {
       if (!allSites[dns.domain]) {
+        // DNS alone tells us nothing about encryption — use null (unknown)
         allSites[dns.domain] = {
           domain: dns.domain, count: dns.count,
-          failed: dns.failed, encrypted: false,
+          failed: dns.failed, encrypted: null,
           icon: dns.icon, category: dns.category,
+          srcIps: dns.srcIps,
         };
       } else {
         allSites[dns.domain].dnsCount = dns.count;
         allSites[dns.domain].failed = dns.failed || 0;
+        // Merge DNS source IPs into the SNI/HTTP entry
+        if (dns.srcIps) {
+          for (const ip of dns.srcIps) allSites[dns.domain].srcIps.add(ip);
+        }
       }
     });
 
     const websiteList = Object.values(allSites)
       .filter(s => s.domain.length > 3 && !s.domain.match(/^\d/))
+      .map(s => ({ ...s, srcIps: s.srcIps ? [...s.srcIps] : [] }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 50);
 
