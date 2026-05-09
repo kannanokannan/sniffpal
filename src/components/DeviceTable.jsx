@@ -1,7 +1,33 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 export default function DeviceTable({ devices, onDeviceClick, trustedDevices, onTrust }) {
   const [search, setSearch] = useState('');
+  const [trustedSet, setTrustedSet] = useState(new Set());
+
+  useEffect(() => {
+    if (!devices?.length || !trustedDevices?.length) {
+      setTrustedSet(new Set());
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const pairs = await Promise.all(
+        devices.map(async d => {
+          const buf = await crypto.subtle.digest(
+            'SHA-256', new TextEncoder().encode(d.mac.toLowerCase())
+          );
+          const hash = Array.from(new Uint8Array(buf))
+            .map(b => b.toString(16).padStart(2, '0')).join('');
+          return [d.mac, hash];
+        })
+      );
+      if (!cancelled)
+        setTrustedSet(new Set(
+          pairs.filter(([, h]) => trustedDevices.includes(h)).map(([m]) => m)
+        ));
+    })();
+    return () => { cancelled = true; };
+  }, [devices, trustedDevices]);
 
   const filtered = devices.filter(d =>
     d.mac.toLowerCase().includes(search.toLowerCase()) ||
@@ -56,7 +82,7 @@ export default function DeviceTable({ devices, onDeviceClick, trustedDevices, on
       {/* Scrollable List */}
       <div style={{ height: 450, overflowY: 'auto' }}>
         {filtered.length > 0 ? filtered.map((device, index) => {
-          const isTrusted = trustedDevices?.includes(device.mac);
+          const isTrusted = trustedSet.has(device.mac);
           const isTop = index === 0;
 
           return (

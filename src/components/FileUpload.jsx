@@ -50,9 +50,28 @@ export default function FileUpload({ onFile }) {
         <h3 className="text-xl font-semibold text-white mb-1">
           Drop your Wireshark JSON export here
         </h3>
-        <p className="text-slate-400 text-sm mb-6">
+        <p className="text-slate-400 text-sm mb-3">
           Supports captures from Wireshark, tshark, and PCAPdroid
         </p>
+
+        {/* File size info */}
+        <div className="flex items-center justify-center gap-3 mb-6 flex-wrap">
+          <span className="flex items-center gap-1.5 bg-green-900/30
+          border border-green-800/50 text-green-400 text-xs
+          px-3 py-1 rounded-full font-medium">
+            ✅ No file size limit
+          </span>
+          <span className="flex items-center gap-1.5 bg-slate-700/40
+          border border-white/5 text-slate-400 text-xs
+          px-3 py-1 rounded-full">
+            📊 Large files sampled to 25,000 packets
+          </span>
+          <span className="flex items-center gap-1.5 bg-slate-700/40
+          border border-white/5 text-slate-400 text-xs
+          px-3 py-1 rounded-full">
+            🔒 100% local — never uploaded
+          </span>
+        </div>
 
         <label className="cursor-pointer bg-gradient-to-r
         from-cyan-600 to-blue-600 text-white px-8 py-3

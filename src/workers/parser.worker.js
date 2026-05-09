@@ -2,6 +2,8 @@
 // Runs entirely off the main UI thread
 // Handles 500MB+ files without freezing the browser
 
+import { lookupCountry } from '../utils/geoip.js';
+
 const TRACKER_DOMAINS = [
   "google-analytics.com", "doubleclick.net",
   "googleadservices.com", "googletagmanager.com",
@@ -21,49 +23,110 @@ const TRACKER_DOMAINS = [
 // Max packets to process — prevents memory crash on huge files
 const MAX_PACKETS = 25000;
 
-self.onmessage = function (e) {
-  const { text, fileSize } = e.data;
+// ── Streaming JSON packet parser ─────────────────────
+// Phase 1: byte-level scan for packet boundaries — zero string allocation,
+//          works on files of any size without hitting V8 string limits.
+// Phase 2: read each sampled packet individually and parse.
+async function streamParsePackets(file, onProgress) {
+  const CHUNK = 16 * 1024 * 1024; // 16 MB scan chunks
+  const totalBytes = file.size;
 
-  try {
-    // ── Step 1: Parse JSON ──────────────────────────
-    self.postMessage({ type: "progress", value: 5, label: "Parsing JSON..." });
+  // ── Phase 1: scan raw bytes, reservoir-sample byte offsets ──
+  const offsets = []; // [[byteStart, byteEnd], ...]  max MAX_PACKETS entries
+  let totalPacketCount = 0;
+  let depth = 0, inStr = false, esc = false;
+  let pktByteStart = -1;
 
-    let allPackets;
-    try {
-      allPackets = JSON.parse(text);
-    } catch {
-      self.postMessage({ type: "error", message: "Invalid JSON — please export from Wireshark as JSON." });
-      return;
-    }
+  for (let base = 0; base < totalBytes; base += CHUNK) {
+    const end = Math.min(base + CHUNK, totalBytes);
+    const bytes = new Uint8Array(await file.slice(base, end).arrayBuffer());
 
-    if (!Array.isArray(allPackets)) {
-      self.postMessage({ type: "error", message: "Unexpected format. Please use File → Export Packet Dissections → As JSON." });
-      return;
-    }
+    for (let i = 0; i < bytes.length; i++) {
+      const b = bytes[i];
+      if (esc)                    { esc = false;       continue; }
+      if (b === 0x5C && inStr)    { esc = true;        continue; } // backslash
+      if (b === 0x22)             { inStr = !inStr;    continue; } // "
+      if (inStr)                  { continue; }
 
-    // ── Step 2: Sample if too large ─────────────────
-    const totalPacketCount = allPackets.length;
-    let packets = allPackets;
-    let sampled = false;
-
-    if (totalPacketCount > MAX_PACKETS) {
-      sampled = true;
-      // Take evenly spaced samples across entire capture
-      const step = Math.floor(totalPacketCount / MAX_PACKETS);
-      packets = [];
-      for (let i = 0; i < totalPacketCount; i += step) {
-        packets.push(allPackets[i]);
-        if (packets.length >= MAX_PACKETS) break;
+      if (b === 0x7B || b === 0x5B) {               // { [
+        depth++;
+        if (b === 0x7B && depth === 2 && pktByteStart < 0) pktByteStart = base + i;
+      } else if (b === 0x7D || b === 0x5D) {        // } ]
+        if (b === 0x7D && depth === 2 && pktByteStart >= 0) {
+          totalPacketCount++;
+          if (offsets.length < MAX_PACKETS) {
+            offsets.push([pktByteStart, base + i]);
+          } else {
+            const j = Math.floor(Math.random() * totalPacketCount);
+            if (j < MAX_PACKETS) offsets[j] = [pktByteStart, base + i];
+          }
+          pktByteStart = -1;
+        }
+        depth--;
       }
     }
 
-    // Free original array from memory
-    allPackets = null;
+    onProgress(
+      5 + Math.round((end / totalBytes) * 13),
+      `Scanning… ${totalPacketCount.toLocaleString()} packets found`
+    );
+  }
 
-    self.postMessage({ type: "progress", value: 20, label: `Analysing ${packets.length.toLocaleString()} packets...` });
+  if (totalPacketCount === 0) return { packets: [], totalPacketCount: 0 };
+
+  // Sort by start offset so Phase 2 reads are sequential (faster on disk)
+  offsets.sort((a, b) => a[0] - b[0]);
+
+  // ── Phase 2: read and parse each sampled packet individually ──
+  onProgress(18, `Parsing ${offsets.length.toLocaleString()} sampled packets…`);
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  const packets = [];
+
+  for (let i = 0; i < offsets.length; i++) {
+    const [start, end] = offsets[i];
+    const buf = await file.slice(start, end + 1).arrayBuffer();
+    try { packets.push(JSON.parse(decoder.decode(buf))); } catch { /* skip malformed */ }
+
+    if (i % 500 === 0 && i > 0) {
+      onProgress(
+        18 + Math.round((i / offsets.length) * 4),
+        `Parsing ${i.toLocaleString()} / ${offsets.length.toLocaleString()} packets…`
+      );
+    }
+  }
+
+  return { packets, totalPacketCount };
+}
+
+self.onmessage = async function (e) {
+  const { file, fileSize } = e.data;
+
+  try {
+    // ── Step 1: Stream-parse the file ──────────────
+    self.postMessage({ type: "progress", value: 5, label: "Scanning file…" });
+
+    let totalPacketCount, packets;
+    try {
+      ({ totalPacketCount, packets } = await streamParsePackets(
+        file,
+        (pct, label) => self.postMessage({ type: "progress", value: pct, label })
+      ));
+    } catch (err) {
+      self.postMessage({ type: "error", message: "Could not read file: " + err.message });
+      return;
+    }
+
+    if (totalPacketCount === 0) {
+      self.postMessage({ type: "error", message: "No packets found. Please export from Wireshark as JSON (File → Export Packet Dissections → As JSON)." });
+      return;
+    }
+
+    const sampled = totalPacketCount > MAX_PACKETS;
+
+    self.postMessage({ type: "progress", value: 22, label: `Analysing ${packets.length.toLocaleString()} packets…` });
 
     // ── Step 3: Process packets in chunks ───────────
-    const devices = {};
+    const devices = Object.create(null);
     const protocols = {};
     const trafficTypes = {};
     const dnsQueries = {};
@@ -79,8 +142,19 @@ self.onmessage = function (e) {
     let icmpRedirects = 0;
     const rttValues = [];
 
+    // ── v2.1 IoT + GeoIP tracking ──────────────────
+    const mqttUnencryptedDevices = new Set();
+    const upnpDevices = new Set();
+    const oddHoursDevices = new Set();
+    const foreignConnections = Object.create(null); // mac → { countryCode: { count, flag } }
+    const ipGeoCache = Object.create(null);          // dstIp → lookupCountry result (cache)
+    const SUSPICIOUS_COUNTRIES = new Set(['CN', 'RU', 'KP', 'IR']);
+    let captureStart = null;
+    let captureEnd = null;
+
     const CHUNK = 1000;
     const total = packets.length;
+    const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
 
     for (let i = 0; i < total; i++) {
       const pkt = packets[i];
@@ -279,7 +353,8 @@ self.onmessage = function (e) {
       const hostname = layers?.bootp?.["bootp.option.hostname"] || layers?.dhcp?.["dhcp.option.hostname"] || null;
 
       [srcMac, dstMac].forEach((mac, idx) => {
-        if (!mac || mac.startsWith("ff:ff") || mac.startsWith("33:33") || mac.startsWith("01:00")) return;
+        if (!mac || !MAC_RE.test(mac)) return;
+        if (mac.startsWith("ff:ff") || mac.startsWith("33:33") || mac.startsWith("01:00")) return;
         if (!devices[mac]) {
           const vendor = lookupVendor(mac);
           devices[mac] = {
@@ -299,9 +374,64 @@ self.onmessage = function (e) {
         }
       });
 
+      // ── v2.1: Capture timestamp ────────────────────
+      const timeEpoch = parseFloat(layers?.frame?.["frame.time_epoch"] || 0);
+      if (timeEpoch > 0) {
+        if (!captureStart || timeEpoch < captureStart) captureStart = timeEpoch;
+        if (!captureEnd   || timeEpoch > captureEnd)   captureEnd   = timeEpoch;
+      }
+
+      // ── v2.1: mDNS device naming (port 5353) ──────
+      if (layers?.dns) {
+        const mdnsName = layers.dns?.["dns.qry.name"];
+        if (mdnsName && mdnsName.endsWith('.local')) {
+          // Instance queries: "Living Room TV._airplay._tcp.local" → "Living Room TV"
+          const m = mdnsName.match(/^([^_][^.]+)\._/);
+          if (m && srcMac && devices[srcMac] && !devices[srcMac].hostname) {
+            devices[srcMac].hostname = m[1].trim();
+          }
+        }
+        // NetBIOS / NBNS machine names
+        const nbnsName = layers?.nbns?.["nbns.name"];
+        if (nbnsName && srcMac && devices[srcMac] && !devices[srcMac].hostname) {
+          devices[srcMac].hostname = nbnsName.replace(/\s*<\d+>\s*$/, '').trim();
+        }
+      }
+
+      // ── v2.1: IoT protocol detection ──────────────
+      if (dstPort === 1883 || srcPort === 1883) {
+        // Unencrypted MQTT — cleartext IoT messaging
+        const key = srcMac || srcIp || 'unknown';
+        mqttUnencryptedDevices.add(key);
+      }
+      if (dstPort === 1900 || srcPort === 1900) {
+        // UPnP/SSDP — devices advertising port-opening
+        const key = srcMac || srcIp || 'unknown';
+        upnpDevices.add(key);
+      }
+
+      // ── v2.1: Odd-hours traffic (2am–5am local) ───
+      if (timeEpoch > 0 && srcMac) {
+        const hr = new Date(timeEpoch * 1000).getHours();
+        if (hr >= 2 && hr < 5) oddHoursDevices.add(srcMac);
+      }
+
+      // ── v2.1: Foreign IP detection ────────────────
+      if (dstIp && srcMac) {
+        let geo = ipGeoCache[dstIp];
+        if (geo === undefined) geo = ipGeoCache[dstIp] = lookupCountry(dstIp);
+        if (geo && geo.code && SUSPICIOUS_COUNTRIES.has(geo.code)) {
+          if (!foreignConnections[srcMac]) foreignConnections[srcMac] = Object.create(null);
+          if (!foreignConnections[srcMac][geo.code]) {
+            foreignConnections[srcMac][geo.code] = { count: 0, flag: geo.flag };
+          }
+          foreignConnections[srcMac][geo.code].count++;
+        }
+      }
+
       // ── Progress updates every chunk ───────────────
       if (i % CHUNK === 0 && i > 0) {
-        const pct = 20 + Math.floor((i / total) * 70);
+        const pct = 22 + Math.floor((i / total) * 68);
         self.postMessage({
           type: "progress",
           value: pct,
@@ -385,6 +515,54 @@ self.onmessage = function (e) {
       });
     }
 
+    // ── v2.1: IoT alerts ──────────────────────────
+    if (mqttUnencryptedDevices.size > 0) {
+      securityAlerts.push({
+        severity: 'critical', icon: '🔴',
+        title: `Unencrypted MQTT on ${mqttUnencryptedDevices.size} device${mqttUnencryptedDevices.size > 1 ? 's' : ''}`,
+        detail: 'Port 1883 (cleartext MQTT) detected. Smart home messages are visible to anyone on the network. Switch to TLS on port 8883.',
+        type: 'mqtt_unencrypted',
+      });
+    }
+
+    if (upnpDevices.size > 0) {
+      securityAlerts.push({
+        severity: 'warning', icon: '🟡',
+        title: `UPnP/SSDP active — ${upnpDevices.size} device${upnpDevices.size > 1 ? 's' : ''}`,
+        detail: 'UPnP lets devices automatically open router ports without your knowledge. Disable UPnP on your router unless required.',
+        type: 'upnp',
+      });
+    }
+
+    if (oddHoursDevices.size > 0) {
+      securityAlerts.push({
+        severity: 'warning', icon: '🟡',
+        title: `${oddHoursDevices.size} device${oddHoursDevices.size > 1 ? 's' : ''} active at odd hours (2am–5am)`,
+        detail: 'Unusual network activity detected while you were likely asleep. Verify these devices are supposed to be communicating at night.',
+        type: 'odd_hours',
+      });
+    }
+
+    // ── v2.1: Foreign IP alerts (one per country) ──
+    const COUNTRY_NAMES = { CN: 'China', RU: 'Russia', KP: 'North Korea', IR: 'Iran' };
+    const countrySummary = Object.create(null);
+    for (const countryMap of Object.values(foreignConnections)) {
+      for (const [code, info] of Object.entries(countryMap)) {
+        if (!countrySummary[code]) countrySummary[code] = { flag: info.flag, totalCount: 0, deviceCount: 0 };
+        countrySummary[code].totalCount += info.count;
+        countrySummary[code].deviceCount++;
+      }
+    }
+    for (const [code, info] of Object.entries(countrySummary)) {
+      const name = COUNTRY_NAMES[code] || code;
+      securityAlerts.push({
+        severity: 'critical', icon: '🔴',
+        title: `${info.flag} ${info.totalCount} connection${info.totalCount > 1 ? 's' : ''} to ${name}`,
+        detail: `${info.deviceCount} device${info.deviceCount > 1 ? 's' : ''} on your network called ${name} servers ${info.totalCount} time${info.totalCount > 1 ? 's' : ''}. Possible IoT phone-home activity.`,
+        type: 'foreign_ip',
+      });
+    }
+
     const uniqueAlerts = securityAlerts.filter(
       (a, i, arr) => arr.findIndex(b => b.title === a.title) === i
     );
@@ -447,6 +625,8 @@ self.onmessage = function (e) {
         security: uniqueAlerts,
         nxdomainCount,
         trackers: Object.values(trackers).sort((a, b) => b.count - a.count),
+        captureStart: captureStart ? new Date(captureStart * 1000).toISOString() : null,
+        captureEnd:   captureEnd   ? new Date(captureEnd   * 1000).toISOString() : null,
       }
     });
 

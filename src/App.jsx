@@ -8,6 +8,7 @@ import SecurityTab from './components/SecurityTab';
 import PrivacyReport from './components/PrivacyReport';
 import HealthScore from './components/HealthScore';
 import DataPanel from './components/DataPanel';
+import PrintReport from './components/PrintReport';
 import { saveSession, loadSession, clearSession, timeAgo } from './utils/useSession';
 import { calculateHealthScore } from './utils/healthScore';
 import { Activity, AlertTriangle, Cpu, Clock } from 'lucide-react';
@@ -17,12 +18,18 @@ export default function App() {
   const [progress, setProgress] = useState(null);
   const [trustedDevices, setTrustedDevices] = useState(() => {
     try {
-      return JSON.parse(localStorage.getItem('sniffpal_trusted') || '[]');
+      const stored = JSON.parse(localStorage.getItem('sniffpal_trusted') || '[]');
+      // Migrate: drop any legacy entries that are raw MACs (contain colons)
+      const hashes = stored.filter(v => typeof v === 'string' && !v.includes(':'));
+      if (hashes.length !== stored.length)
+        localStorage.setItem('sniffpal_trusted', JSON.stringify(hashes));
+      return hashes;
     } catch { return []; }
   });
   const [selectedDataPoint, setSelectedDataPoint] = useState(null);
   const [resumeSession, setResumeSession] = useState(null);
   const [healthScore, setHealthScore] = useState(null);
+  const [currentFileName, setCurrentFileName] = useState(null);
 
   // ── Load saved session on startup ─────────────────
   useEffect(() => {
@@ -32,11 +39,16 @@ export default function App() {
   }, []);
 
   // ── Trust device toggle ───────────────────────────
-  const handleTrust = useCallback((mac) => {
+  const handleTrust = useCallback(async (mac) => {
+    const buf = await crypto.subtle.digest(
+      'SHA-256', new TextEncoder().encode(mac.toLowerCase())
+    );
+    const hash = Array.from(new Uint8Array(buf))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
     setTrustedDevices(prev => {
-      const updated = prev.includes(mac)
-        ? prev.filter(m => m !== mac)
-        : [...prev, mac];
+      const updated = prev.includes(hash)
+        ? prev.filter(h => h !== hash)
+        : [...prev, hash];
       localStorage.setItem('sniffpal_trusted', JSON.stringify(updated));
       return updated;
     });
@@ -47,43 +59,41 @@ export default function App() {
     setParsedData(null);
     setResumeSession(null);
     setSelectedDataPoint(null);
-    setProgress({ value: 0, label: 'Reading file...' });
+    setProgress({ value: 0, label: 'Reading file…' });
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target.result;
-      const worker = new Worker(
-        new URL('./workers/parser.worker.js', import.meta.url),
-        { type: 'module' }
-      );
+    const worker = new Worker(
+      new URL('./workers/parser.worker.js', import.meta.url),
+      { type: 'module' }
+    );
 
-      worker.postMessage({ text, fileSize: file.size });
-
-      worker.onmessage = (msg) => {
-        const { type, value, label, data, message } = msg.data;
-        if (type === 'progress') setProgress({ value, label });
-        if (type === 'result') {
-          const score = calculateHealthScore(data);
-          setParsedData(data);
-          setHealthScore(score);
-          setProgress(null);
-          saveSession(data, file.name);
-          worker.terminate();
-        }
-        if (type === 'error') {
-          alert(message);
-          setProgress(null);
-          worker.terminate();
-        }
-      };
-
-      worker.onerror = (err) => {
-        alert('Worker error: ' + err.message);
+    worker.onmessage = (msg) => {
+      const { type, value, label, data, message } = msg.data;
+      if (type === 'progress') setProgress({ value, label });
+      if (type === 'result') {
+        const score = calculateHealthScore(data);
+        setParsedData(data);
+        setHealthScore(score);
+        setCurrentFileName(file.name);
+        setProgress(null);
+        saveSession(data, file.name);
+        worker.terminate();
+      }
+      if (type === 'error') {
+        alert(message);
         setProgress(null);
         worker.terminate();
-      };
+      }
     };
-    reader.readAsText(file);
+
+    worker.onerror = (err) => {
+      alert('Worker error: ' + err.message);
+      setProgress(null);
+      worker.terminate();
+    };
+
+    // Pass the File reference directly — zero copy, no main-thread reading.
+    // The worker slices it in 16 MB chunks so memory stays bounded regardless of size.
+    worker.postMessage({ file, fileSize: file.size });
   }, []);
 
   // ── Resume session ────────────────────────────────
@@ -106,7 +116,8 @@ export default function App() {
   ) || [];
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200
+    <>
+    <div className="print:hidden min-h-screen bg-slate-950 text-slate-200
     font-sans relative overflow-hidden">
 
       {/* Background Orbs */}
@@ -130,7 +141,7 @@ export default function App() {
                 SniffPal
               </h1>
               <p className="text-slate-500 text-xs">
-                Network Intelligence · v2.0
+                Network Intelligence · v2.1
               </p>
             </div>
           </div>
@@ -178,10 +189,19 @@ export default function App() {
                 · {parsedData.fileSizeMB} MB
               </span>
               <button
+                onClick={() => window.print()}
+                className="text-sm bg-cyan-600 hover:bg-cyan-500
+                text-white px-4 py-1.5 rounded-xl transition-all
+                font-medium flex items-center gap-1.5"
+              >
+                📄 Generate Report
+              </button>
+              <button
                 onClick={() => {
                   setParsedData(null);
                   setSelectedDataPoint(null);
                   setHealthScore(null);
+                  setCurrentFileName(null);
                 }}
                 className="text-sm text-slate-400
                 hover:text-cyan-400 transition-all"
@@ -415,7 +435,7 @@ export default function App() {
       </main>
 
       <div className="text-center text-slate-700 text-xs py-6">
-        SniffPal v2.0 — Open Source Network Intelligence ·
+        SniffPal v2.1 — Open Source Network Intelligence ·
         <a
           href="https://github.com/kannanokannan/sniffpal"
           target="_blank"
@@ -426,5 +446,15 @@ export default function App() {
         </a>
       </div>
     </div>
+
+    {/* Print-only report — hidden on screen, visible when window.print() fires */}
+    <div className="hidden print:block">
+      <PrintReport
+        data={parsedData}
+        healthScore={healthScore}
+        fileName={currentFileName}
+      />
+    </div>
+    </>
   );
 }
