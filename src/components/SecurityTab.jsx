@@ -4,12 +4,17 @@ import {
   getAIStatus, initAI, probeStatus,
 } from '../utils/geminiNano.js';
 
+/** Build instant template explanations from findings — shown before AI loads */
+function buildTemplateExplanations(findings) {
+  return (findings || []).map(f => ({ id: f.id, explanation: f.description }));
+}
+
 export default function SecurityTab({
   alerts, retransmissions, avgRtt, nxdomainCount, selfIp, onGoToDevices,
   findings, deviceCount,
 }) {
   const [selfExpanded, setSelfExpanded]   = useState(false);
-  const [aiInsights, setAiInsights]       = useState(null);   // [{id, explanation}]
+  const [explanations, setExplanations]   = useState([]);     // [{id, explanation}] — templates or AI-upgraded
   const [aiSummary, setAiSummary]         = useState(null);   // string
   const [aiLoading, setAiLoading]         = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(null); // {percent, message}
@@ -26,8 +31,11 @@ export default function SecurityTab({
     if (!findings || findings.length === 0) return;
     let cancelled = false;
 
+    // Show template explanations immediately — no waiting for AI
+    setExplanations(buildTemplateExplanations(findings));
+
     (async () => {
-      // Initialise whichever AI tier is available (Nano first, then Transformers.js)
+      // initAI() defers itself via setTimeout(0) — never blocks initial render
       await initAI((percent, message) => {
         if (cancelled) return;
         setDownloadProgress({ percent, message });
@@ -44,7 +52,10 @@ export default function SecurityTab({
         const critCount = (alerts || []).filter(a => a.severity === 'critical').length;
         const warnCount = (alerts || []).filter(a => a.severity === 'warning').length;
 
-        const [explanations, summary] = await Promise.all([
+        // Yield to browser before kicking off AI calls so templates remain interactive
+        await new Promise(r => setTimeout(r, 0));
+
+        const [aiExplanations, summary] = await Promise.all([
           explainFindings(findings),
           summarizeSession(
             deviceCount || 0,
@@ -53,7 +64,8 @@ export default function SecurityTab({
           ),
         ]);
         if (!cancelled) {
-          setAiInsights(explanations);
+          // AI upgrades templates quietly — only replace if we got results
+          if (aiExplanations) setExplanations(aiExplanations);
           setAiSummary(summary);
         }
       } catch (err) {
@@ -289,7 +301,7 @@ export default function SecurityTab({
           )}
         </h2>
 
-        {/* ── checking: probing Nano on mount ── */}
+        {/* ── checking: probing on mount ── */}
         {aiStatus === 'checking' && (
           <div className="flex items-center gap-3 text-slate-500 text-sm py-3">
             <span className="animate-spin text-lg">⚙️</span>
@@ -299,7 +311,7 @@ export default function SecurityTab({
 
         {/* ── downloading: Chrome is pulling down the AI model ── */}
         {aiStatus === 'downloading' && (
-          <div className="bg-blue-900/20 border border-blue-800/40 rounded-xl p-4 flex items-start gap-3">
+          <div className="bg-blue-900/20 border border-blue-800/40 rounded-xl p-4 flex items-start gap-3 mb-4">
             <span className="text-2xl flex-shrink-0">⬇️</span>
             <div>
               <p className="text-blue-300 text-sm font-medium">Chrome AI model downloading…</p>
@@ -313,7 +325,7 @@ export default function SecurityTab({
 
         {/* ── loading: Transformers.js model downloading (~200 MB) ── */}
         {aiStatus === 'loading' && (
-          <div className="bg-slate-900/50 border border-white/5 rounded-xl p-5 space-y-3">
+          <div className="bg-slate-900/50 border border-white/5 rounded-xl p-5 space-y-3 mb-4">
             <div className="flex items-center gap-3">
               <span className="animate-spin text-xl flex-shrink-0">⚙️</span>
               <p className="text-slate-300 text-sm font-medium">
@@ -332,94 +344,56 @@ export default function SecurityTab({
           </div>
         )}
 
-        {/* ── unavailable: show template cards — no error message ── */}
-        {aiStatus === 'unavailable' && (
-          <div className="space-y-3">
-            {(!findings || findings.length === 0) ? (
-              <p className="text-slate-500 text-sm">No enrichment findings to display.</p>
-            ) : (
-              findings.map((f, i) => (
-                <div key={i}
-                  className="bg-slate-900/50 rounded-xl p-4 border border-white/5 flex items-start gap-3">
-                  <span className="text-violet-400 font-mono text-xs mt-0.5 flex-shrink-0">{f.id}</span>
-                  <div>
-                    <p className="text-white text-xs font-medium mb-1">{f.title}</p>
-                    <p className="text-slate-400 text-xs leading-relaxed">{f.description}</p>
-                    <p className="text-cyan-700 text-xs font-mono mt-1">✓ Fix: {f.fix}</p>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        )}
-
-        {/* ── AI ready (Chrome or Transformers.js) — show content ── */}
-        {(['both', 'summarizer', 'languagemodel', 'transformers'].includes(aiStatus)) && (
-          <>
-            {(!findings || findings.length === 0) && (
-              <p className="text-slate-500 text-sm">No enrichment findings to explain.</p>
-            )}
-
+        {/* ── content: templates shown immediately, AI upgrades quietly ── */}
+        {(!findings || findings.length === 0) ? (
+          aiStatus !== 'checking' && (
+            <p className="text-slate-500 text-sm">No enrichment findings to display.</p>
+          )
+        ) : (
+          <div className="space-y-4">
+            {/* Subtle AI-enhancing indicator — content already visible below */}
             {aiLoading && (
-              <div className="flex items-center gap-3 text-slate-400 text-sm py-4">
-                <span className="animate-spin text-xl">⚙️</span>
-                {aiStatus === 'transformers' ? 'Asking SmolLM2…' : 'Asking Gemini Nano…'}
+              <div className="flex items-center gap-2 text-slate-500 text-xs">
+                <span className="animate-spin">⚙️</span>
+                {aiStatus === 'transformers' ? 'Enhancing with SmolLM2…' : 'Enhancing with Gemini Nano…'}
               </div>
             )}
 
-            {!aiLoading && (
-              <div className="space-y-4">
-                {/* Session summary */}
-                {aiSummary && (
-                  <div className="bg-violet-900/20 border border-violet-800/40 rounded-xl p-4">
-                    <p className="text-violet-300 text-sm leading-relaxed">{aiSummary}</p>
-                  </div>
-                )}
+            {/* Session summary — appears once AI delivers it */}
+            {aiSummary && (
+              <div className="bg-violet-900/20 border border-violet-800/40 rounded-xl p-4">
+                <p className="text-violet-300 text-sm leading-relaxed">{aiSummary}</p>
+              </div>
+            )}
 
-                {/* Per-finding AI explanations */}
-                {aiInsights && aiInsights.length > 0 && (
-                  <div className="space-y-3">
-                    {aiInsights.map((item) => {
-                      const finding = (findings || []).find(f => f.id === item.id);
-                      return (
-                        <div key={item.id}
-                          className="bg-slate-900/50 rounded-xl p-4 border border-white/5">
-                          <div className="flex items-start gap-3">
-                            <span className="text-violet-400 font-mono text-xs mt-0.5 flex-shrink-0">
-                              {item.id}
-                            </span>
-                            <div>
-                              {finding && (
-                                <p className="text-white text-xs font-medium mb-1">{finding.title}</p>
-                              )}
-                              <p className="text-slate-400 text-xs leading-relaxed">{item.explanation}</p>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {/* Raw findings fallback (AI ready but no explanations produced yet) */}
-                {!aiInsights && findings && findings.length > 0 && (
-                  <div className="space-y-3">
-                    {findings.map((f, i) => (
-                      <div key={i}
-                        className="bg-slate-900/50 rounded-xl p-4 border border-white/5 flex items-start gap-3">
-                        <span className="text-violet-400 font-mono text-xs mt-0.5 flex-shrink-0">{f.id}</span>
+            {/* Per-finding cards — templates shown instantly, silently upgraded by AI */}
+            {explanations.length > 0 && (
+              <div className="space-y-3">
+                {explanations.map((item) => {
+                  const finding = (findings || []).find(f => f.id === item.id);
+                  return (
+                    <div key={item.id}
+                      className="bg-slate-900/50 rounded-xl p-4 border border-white/5">
+                      <div className="flex items-start gap-3">
+                        <span className="text-violet-400 font-mono text-xs mt-0.5 flex-shrink-0">
+                          {item.id}
+                        </span>
                         <div>
-                          <p className="text-white text-xs font-medium mb-1">{f.title}</p>
-                          <p className="text-slate-400 text-xs">{f.description}</p>
-                          <p className="text-cyan-700 text-xs font-mono mt-1">✓ Fix: {f.fix}</p>
+                          {finding && (
+                            <p className="text-white text-xs font-medium mb-1">{finding.title}</p>
+                          )}
+                          <p className="text-slate-400 text-xs leading-relaxed">{item.explanation}</p>
+                          {finding && (
+                            <p className="text-cyan-700 text-xs font-mono mt-1">✓ Fix: {finding.fix}</p>
+                          )}
                         </div>
                       </div>
-                    ))}
-                  </div>
-                )}
+                    </div>
+                  );
+                })}
               </div>
             )}
-          </>
+          </div>
         )}
       </div>
 

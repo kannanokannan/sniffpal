@@ -174,17 +174,30 @@ async function _doInit(onProgress) {
       },
     };
 
-    // Primary host → mirror fallback
+    // Primary host → mirror fallback, both guarded by a 10-second AbortController
+    // so a hung HuggingFace fetch never freezes the page.
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 10_000);
     try {
-      _pipeline = await pipeline(
-        'text-generation', 'HuggingFaceTB/SmolLM2-360M-Instruct', pipelineOpts
-      );
-    } catch (err1) {
-      console.warn('[SniffPal] HuggingFace primary failed, trying hf-mirror.com:', err1.message);
-      env.remoteHost = 'https://hf-mirror.com';
-      _pipeline = await pipeline(
-        'text-generation', 'HuggingFaceTB/SmolLM2-360M-Instruct', pipelineOpts
-      );
+      env.fetchOptions = { signal: controller.signal };
+      try {
+        _pipeline = await pipeline(
+          'text-generation', 'HuggingFaceTB/SmolLM2-360M-Instruct', pipelineOpts
+        );
+      } catch (err1) {
+        if (controller.signal.aborted) throw err1; // timed out — skip mirror
+        console.warn('[SniffPal] HuggingFace primary failed, trying hf-mirror.com:', err1.message);
+        env.remoteHost = 'https://hf-mirror.com';
+        _pipeline = await pipeline(
+          'text-generation', 'HuggingFaceTB/SmolLM2-360M-Instruct', pipelineOpts
+        );
+      }
+    } catch (e) {
+      console.log('[SniffPal] Transformers.js unreachable, using templates');
+      _status = 'unavailable';
+      return;
+    } finally {
+      clearTimeout(abortTimer);
     }
 
     _status = 'transformers';
@@ -207,7 +220,11 @@ export async function initAI(onProgress) {
   if (['both','summarizer','languagemodel','transformers','downloading'].includes(_status)) return;
   // Coalesce concurrent calls
   if (_initPromise) return _initPromise;
-  _initPromise = _doInit(onProgress).finally(() => { _initPromise = null; });
+  // Defer actual work to the next event-loop tick so initAI() never blocks
+  // the current render frame — critical for keeping UI responsive on slow networks.
+  _initPromise = new Promise(resolve => setTimeout(resolve, 0))
+    .then(() => _doInit(onProgress))
+    .finally(() => { _initPromise = null; });
   return _initPromise;
 }
 
