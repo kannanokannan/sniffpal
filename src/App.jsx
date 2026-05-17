@@ -18,11 +18,11 @@ export default function App() {
   const [progress, setProgress] = useState(null);
   const [trustedDevices, setTrustedDevices] = useState(() => {
     try {
-      const stored = JSON.parse(localStorage.getItem('sniffpal_trusted') || '[]');
+      const stored = JSON.parse(sessionStorage.getItem('sniffpal_trusted') || '[]');
       // Migrate: drop any legacy entries that are raw MACs (contain colons)
       const hashes = stored.filter(v => typeof v === 'string' && !v.includes(':'));
       if (hashes.length !== stored.length)
-        localStorage.setItem('sniffpal_trusted', JSON.stringify(hashes));
+        sessionStorage.setItem('sniffpal_trusted', JSON.stringify(hashes));
       return hashes;
     } catch { return []; }
   });
@@ -31,7 +31,7 @@ export default function App() {
   const [healthScore, setHealthScore] = useState(null);
   const [currentFileName, setCurrentFileName] = useState(null);
   const [selfIp, setSelfIp] = useState(() =>
-    localStorage.getItem('sniffpal_self_ip') || null
+    sessionStorage.getItem('sniffpal_self_ip') || null
   );
   const deviceTableRef = useRef(null);
 
@@ -53,7 +53,7 @@ export default function App() {
       const updated = prev.includes(hash)
         ? prev.filter(h => h !== hash)
         : [...prev, hash];
-      localStorage.setItem('sniffpal_trusted', JSON.stringify(updated));
+      sessionStorage.setItem('sniffpal_trusted', JSON.stringify(updated));
       return updated;
     });
   }, []);
@@ -117,8 +117,8 @@ export default function App() {
 
   const handleSetSelf = useCallback((ip) => {
     setSelfIp(ip);
-    if (ip) localStorage.setItem('sniffpal_self_ip', ip);
-    else localStorage.removeItem('sniffpal_self_ip');
+    if (ip) sessionStorage.setItem('sniffpal_self_ip', ip);
+    else sessionStorage.removeItem('sniffpal_self_ip');
   }, []);
 
   const scrollToDevices = useCallback(() => {
@@ -465,6 +465,8 @@ export default function App() {
               nxdomainCount={parsedData.nxdomainCount}
               selfIp={selfIp}
               onGoToDevices={scrollToDevices}
+              findings={parsedData.findings || []}
+              deviceCount={parsedData.devices?.length || 0}
             />
 
           </div>

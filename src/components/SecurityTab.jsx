@@ -1,9 +1,70 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import {
+  explainFindings, summarizeSession,
+  getAIStatus, initAI, probeStatus,
+} from '../utils/geminiNano.js';
 
 export default function SecurityTab({
-  alerts, retransmissions, avgRtt, nxdomainCount, selfIp, onGoToDevices
+  alerts, retransmissions, avgRtt, nxdomainCount, selfIp, onGoToDevices,
+  findings, deviceCount,
 }) {
-  const [selfExpanded, setSelfExpanded] = useState(false);
+  const [selfExpanded, setSelfExpanded]   = useState(false);
+  const [aiInsights, setAiInsights]       = useState(null);   // [{id, explanation}]
+  const [aiSummary, setAiSummary]         = useState(null);   // string
+  const [aiLoading, setAiLoading]         = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(null); // {percent, message}
+  // "both"|"summarizer"|"languagemodel"|"downloading"|"transformers"|"loading"|"unavailable"|"checking"
+  const [aiStatus, setAiStatus]           = useState('checking');
+
+  // Quick Chrome-only probe on mount — never triggers a download
+  useEffect(() => {
+    probeStatus().then(setAiStatus);
+  }, []);
+
+  // Full AI init + explanations when findings arrive (after file upload)
+  useEffect(() => {
+    if (!findings || findings.length === 0) return;
+    let cancelled = false;
+
+    (async () => {
+      // Initialise whichever AI tier is available (Nano first, then Transformers.js)
+      await initAI((percent, message) => {
+        if (cancelled) return;
+        setDownloadProgress({ percent, message });
+        setAiStatus(getAIStatus());
+      });
+
+      if (cancelled) return;
+      const status = getAIStatus();
+      setAiStatus(status);
+      if (!['both', 'summarizer', 'languagemodel', 'transformers'].includes(status)) return;
+
+      setAiLoading(true);
+      try {
+        const critCount = (alerts || []).filter(a => a.severity === 'critical').length;
+        const warnCount = (alerts || []).filter(a => a.severity === 'warning').length;
+
+        const [explanations, summary] = await Promise.all([
+          explainFindings(findings),
+          summarizeSession(
+            deviceCount || 0,
+            { critical: critCount, warning: warnCount, info: findings.length },
+            findings.slice(0, 3)
+          ),
+        ]);
+        if (!cancelled) {
+          setAiInsights(explanations);
+          setAiSummary(summary);
+        }
+      } catch (err) {
+        console.error('[SniffPal] AI explanation failed:', err);
+      } finally {
+        if (!cancelled) setAiLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [findings, alerts, deviceCount]);
 
   // Separate self-device activity from real network alerts
   const selfAlerts = selfIp
@@ -207,6 +268,159 @@ export default function SecurityTab({
             </div>
           </div>
         </div>
+      </div>
+
+      {/* AI Insights */}
+      <div className="bg-slate-800/40 backdrop-blur-md border border-white/5 rounded-2xl p-6">
+
+        {/* Header — badge changes with active AI tier */}
+        <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-violet-400 shadow-[0_0_8px_rgba(167,139,250,0.8)]"></span>
+          AI Insights
+          {['both', 'summarizer', 'languagemodel'].includes(aiStatus) && (
+            <span className="bg-violet-900/40 text-violet-300 text-xs px-2 py-0.5 rounded-full">
+              ⚡ Gemini Nano
+            </span>
+          )}
+          {aiStatus === 'transformers' && (
+            <span className="bg-orange-900/40 text-orange-300 text-xs px-2 py-0.5 rounded-full">
+              🤗 SmolLM2
+            </span>
+          )}
+        </h2>
+
+        {/* ── checking: probing Nano on mount ── */}
+        {aiStatus === 'checking' && (
+          <div className="flex items-center gap-3 text-slate-500 text-sm py-3">
+            <span className="animate-spin text-lg">⚙️</span>
+            Checking AI availability…
+          </div>
+        )}
+
+        {/* ── downloading: Chrome is pulling down the AI model ── */}
+        {aiStatus === 'downloading' && (
+          <div className="bg-blue-900/20 border border-blue-800/40 rounded-xl p-4 flex items-start gap-3">
+            <span className="text-2xl flex-shrink-0">⬇️</span>
+            <div>
+              <p className="text-blue-300 text-sm font-medium">Chrome AI model downloading…</p>
+              <p className="text-blue-500 text-xs mt-1">
+                Chrome is installing the AI model in the background. Explanations will be
+                ready when it finishes. This happens only once.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── loading: Transformers.js model downloading (~200 MB) ── */}
+        {aiStatus === 'loading' && (
+          <div className="bg-slate-900/50 border border-white/5 rounded-xl p-5 space-y-3">
+            <div className="flex items-center gap-3">
+              <span className="animate-spin text-xl flex-shrink-0">⚙️</span>
+              <p className="text-slate-300 text-sm font-medium">
+                {downloadProgress?.message || 'Loading AI model…'}
+              </p>
+            </div>
+            <div className="w-full bg-slate-700 rounded-full h-2">
+              <div
+                className="bg-gradient-to-r from-violet-500 to-orange-400 h-2 rounded-full transition-all duration-500"
+                style={{ width: `${downloadProgress?.percent ?? 0}%` }}
+              />
+            </div>
+            <p className="text-slate-600 text-xs">
+              First-time download only — cached in your browser after this.
+            </p>
+          </div>
+        )}
+
+        {/* ── unavailable: show template cards — no error message ── */}
+        {aiStatus === 'unavailable' && (
+          <div className="space-y-3">
+            {(!findings || findings.length === 0) ? (
+              <p className="text-slate-500 text-sm">No enrichment findings to display.</p>
+            ) : (
+              findings.map((f, i) => (
+                <div key={i}
+                  className="bg-slate-900/50 rounded-xl p-4 border border-white/5 flex items-start gap-3">
+                  <span className="text-violet-400 font-mono text-xs mt-0.5 flex-shrink-0">{f.id}</span>
+                  <div>
+                    <p className="text-white text-xs font-medium mb-1">{f.title}</p>
+                    <p className="text-slate-400 text-xs leading-relaxed">{f.description}</p>
+                    <p className="text-cyan-700 text-xs font-mono mt-1">✓ Fix: {f.fix}</p>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
+        {/* ── AI ready (Chrome or Transformers.js) — show content ── */}
+        {(['both', 'summarizer', 'languagemodel', 'transformers'].includes(aiStatus)) && (
+          <>
+            {(!findings || findings.length === 0) && (
+              <p className="text-slate-500 text-sm">No enrichment findings to explain.</p>
+            )}
+
+            {aiLoading && (
+              <div className="flex items-center gap-3 text-slate-400 text-sm py-4">
+                <span className="animate-spin text-xl">⚙️</span>
+                {aiStatus === 'transformers' ? 'Asking SmolLM2…' : 'Asking Gemini Nano…'}
+              </div>
+            )}
+
+            {!aiLoading && (
+              <div className="space-y-4">
+                {/* Session summary */}
+                {aiSummary && (
+                  <div className="bg-violet-900/20 border border-violet-800/40 rounded-xl p-4">
+                    <p className="text-violet-300 text-sm leading-relaxed">{aiSummary}</p>
+                  </div>
+                )}
+
+                {/* Per-finding AI explanations */}
+                {aiInsights && aiInsights.length > 0 && (
+                  <div className="space-y-3">
+                    {aiInsights.map((item) => {
+                      const finding = (findings || []).find(f => f.id === item.id);
+                      return (
+                        <div key={item.id}
+                          className="bg-slate-900/50 rounded-xl p-4 border border-white/5">
+                          <div className="flex items-start gap-3">
+                            <span className="text-violet-400 font-mono text-xs mt-0.5 flex-shrink-0">
+                              {item.id}
+                            </span>
+                            <div>
+                              {finding && (
+                                <p className="text-white text-xs font-medium mb-1">{finding.title}</p>
+                              )}
+                              <p className="text-slate-400 text-xs leading-relaxed">{item.explanation}</p>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Raw findings fallback (AI ready but no explanations produced yet) */}
+                {!aiInsights && findings && findings.length > 0 && (
+                  <div className="space-y-3">
+                    {findings.map((f, i) => (
+                      <div key={i}
+                        className="bg-slate-900/50 rounded-xl p-4 border border-white/5 flex items-start gap-3">
+                        <span className="text-violet-400 font-mono text-xs mt-0.5 flex-shrink-0">{f.id}</span>
+                        <div>
+                          <p className="text-white text-xs font-medium mb-1">{f.title}</p>
+                          <p className="text-slate-400 text-xs">{f.description}</p>
+                          <p className="text-cyan-700 text-xs font-mono mt-1">✓ Fix: {f.fix}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {/* What SniffPal Checks */}

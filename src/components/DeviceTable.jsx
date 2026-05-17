@@ -90,20 +90,33 @@ export default function DeviceTable({ devices, onDeviceClick, trustedDevices, on
         <span className="text-xl flex-shrink-0">{device.icon}</span>
 
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-white text-xs font-medium truncate">
-              {device.hostname || device.nickname}
+              {device.enriched?.deviceName || device.hostname || device.nickname}
             </span>
             {isSelf    && <span className="text-blue-400 text-xs">🏠 Mine</span>}
             {isTrusted && <span className="text-green-400 text-xs">✓ Trusted</span>}
             {isTop && !isTrusted && !isSelf && (
               <span className="bg-cyan-900/50 text-cyan-400 text-xs px-1.5 rounded-full">Top</span>
             )}
+            {device.enriched?.enrichmentSource?.map(src => (
+              <span key={src}
+                className="bg-violet-900/40 text-violet-400 text-xs px-1.5 py-0.5 rounded-full leading-none">
+                {src}
+              </span>
+            ))}
           </div>
-          <div className="text-slate-500 text-xs truncate">{device.vendor}</div>
+          <div className="text-slate-500 text-xs truncate">
+            {device.enriched?.manufacturer
+              ? `${device.enriched.manufacturer}${device.enriched.model ? ' · ' + device.enriched.model : ''}${device.enriched.osHint ? ' · ' + device.enriched.osHint : ''}`
+              : device.vendor}
+          </div>
         </div>
 
-        <div className="text-cyan-400 font-mono text-xs w-28 flex-shrink-0 hidden md:block">
+        <div
+          title={device.ip || undefined}
+          className="text-cyan-400 font-mono text-xs w-36 flex-shrink-0 hidden md:block truncate"
+        >
           {device.ip || '—'}
         </div>
 
@@ -172,7 +185,7 @@ export default function DeviceTable({ devices, onDeviceClick, trustedDevices, on
         <span className="w-5">#</span>
         <span className="w-6"></span>
         <span className="flex-1">Device</span>
-        <span className="w-28 hidden md:block">IP Address</span>
+        <span className="w-36 hidden md:block">IP Address</span>
         <span className="w-28 hidden lg:block">Activity</span>
         <span className="w-24">Packets</span>
         <span className="w-16">Trust</span>

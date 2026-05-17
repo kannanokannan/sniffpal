@@ -152,6 +152,10 @@ self.onmessage = async function (e) {
     let icmpRedirects = 0;
     const rttValues = [];
 
+    // ── mDNS / SSDP enrichment map ─────────────────
+    // mac → { deviceName, deviceType, osHint, manufacturer, model, services, enrichmentSource }
+    const enrichmentData = Object.create(null);
+
     // ── v2.1 IoT + GeoIP tracking ──────────────────
     const mqttUnencryptedDevices = new Set();
     const upnpDevices = new Set();
@@ -420,6 +424,9 @@ self.onmessage = async function (e) {
         }
       }
 
+      // ── mDNS / SSDP / LLMNR / NetBIOS enrichment ─
+      enrichDevice(layers, srcMac, srcPort, dstPort, enrichmentData);
+
       // ── v2.1: IoT protocol detection ──────────────
       if (dstPort === 1883 || srcPort === 1883) {
         // Unencrypted MQTT — cleartext IoT messaging
@@ -598,14 +605,29 @@ self.onmessage = async function (e) {
       });
     }
 
+    // ── Structured findings from enrichment ────────
+    self.postMessage({ type: "progress", value: 93, label: "Generating findings…" });
+    const findings = generateFindings(enrichmentData, devices);
+
     // ── Final assembly ──────────────────────────────
     const deviceList = Object.values(devices).map(d => {
       refineDeviceType(d, d.seenPorts);
       const { seenPorts, ...rest } = d; // strip Set before postMessage
+      const raw = enrichmentData[d.mac];
+      const enriched = raw ? {
+        deviceName:       raw.deviceName,
+        deviceType:       raw.deviceType || null,
+        osHint:           raw.osHint,
+        manufacturer:     raw.manufacturer,
+        model:            raw.model,
+        services:         raw.services,
+        enrichmentSource: [...raw.enrichmentSource],
+      } : null;
       return {
         ...rest,
-        topTraffic: getTopTraffic(d.trafficTypes),
-        bandwidthMB: (d.bytes / 1024 / 1024).toFixed(2),
+        ...(enriched && { enriched }),
+        topTraffic:   getTopTraffic(d.trafficTypes),
+        bandwidthMB:  (d.bytes / 1024 / 1024).toFixed(2),
       };
     }).sort((a, b) => b.packets - a.packets);
 
@@ -660,6 +682,7 @@ self.onmessage = async function (e) {
         trackers: Object.values(trackers).sort((a, b) => b.count - a.count),
         captureStart: captureStart ? new Date(captureStart * 1000).toISOString() : null,
         captureEnd:   captureEnd   ? new Date(captureEnd   * 1000).toISOString() : null,
+        findings,
       }
     });
 
@@ -939,7 +962,11 @@ function addTransportLayer(data, off, proto, layers) {
     const sp = (data[off]<<8)|data[off+1];
     const dp = (data[off+2]<<8)|data[off+3];
     layers.udp = { 'udp.srcport': String(sp), 'udp.dstport': String(dp) };
-    if (sp===53||dp===53) addDnsLayer(data, off+8, layers);
+    if (sp===53||dp===53)             addDnsLayer(data, off+8, layers);
+    if (sp===5353||dp===5353)         addDnsLayer(data, off+8, layers); // mDNS
+    if (sp===5355||dp===5355)         addDnsLayer(data, off+8, layers); // LLMNR
+    if (sp===137||dp===137)           addNbnsLayer(data, off+8, layers); // NetBIOS
+    if (sp===1900||dp===1900)         addSsdpLayer(data, off+8, layers); // SSDP/UPnP
     if (sp===67||dp===67||sp===68||dp===68) addDhcpLayer(data, off+8, layers);
 
   } else if (proto === 1) { // ICMP
@@ -999,6 +1026,55 @@ function addDhcpLayer(data, off, layers) {
   layers.bootp = {};
   if (msgType)  layers.bootp['bootp.option.dhcp']     = msgType;
   if (hostname) layers.bootp['bootp.option.hostname'] = hostname;
+}
+
+// ── NetBIOS Name Service parser (port 137) ─────────────────────────────────
+function addNbnsLayer(data, off, layers) {
+  // 12-byte DNS-like header; question count at bytes 4-5
+  if (data.length < off + 12) return;
+  const qdCount = (data[off+4]<<8)|data[off+5];
+  if (!qdCount) return;
+  let pos = off + 12;
+  // NetBIOS names are length-prefixed; encoded name length is always 0x20 (32 chars)
+  if (pos >= data.length || data[pos] !== 0x20) return;
+  pos++;
+  if (pos + 32 > data.length) return;
+  // Decode: each byte encoded as two chars offset from 'A' (0x41)
+  let name = '';
+  for (let i = 0; i < 16; i++) {
+    const hi = data[pos + i*2] - 0x41;
+    const lo = data[pos + i*2+1] - 0x41;
+    if (hi < 0||hi>15||lo<0||lo>15) continue;
+    const c = (hi<<4)|lo;
+    if (c > 32 && c < 127) name += String.fromCharCode(c);
+  }
+  name = name.trim();
+  if (name) layers.nbns = { 'nbns.name': name };
+}
+
+// ── SSDP/UPnP parser (port 1900 UDP) ──────────────────────────────────────
+function addSsdpLayer(data, off, layers) {
+  const payloadLen = Math.min(data.length - off, 1024);
+  if (payloadLen < 10) return;
+  // Read raw bytes as ASCII text
+  let txt = '';
+  for (let i = off; i < off + payloadLen; i++) {
+    const c = data[i];
+    if (c === 0) break;
+    txt += String.fromCharCode(c);
+  }
+  const ssdp = {};
+  for (const line of txt.split(/\r\n|\n/)) {
+    const colon = line.indexOf(':');
+    if (colon < 1) continue;
+    const hdr = line.substring(0, colon).trim().toLowerCase();
+    const val = line.substring(colon + 1).trim();
+    if      (hdr === 'server')   ssdp['ssdp.server']   = val;
+    else if (hdr === 'location') ssdp['ssdp.location']  = val;
+    else if (hdr === 'usn')      ssdp['ssdp.usn']       = val;
+    else if (hdr === 'nt' || hdr === 'st') ssdp['ssdp.nt'] = val;
+  }
+  if (Object.keys(ssdp).length > 0) layers.ssdp = ssdp;
 }
 
 // ── Legacy pcap parser (magic 0xa1b2c3d4 / 0xd4c3b2a1 / nanosecond variants) ──
@@ -1167,4 +1243,197 @@ async function parsePcapngBinary(file, onProgress) {
 
   onProgress(90, `Analysing ${packets.length.toLocaleString()} sampled packets…`);
   return { packets, totalPacketCount };
+} // end parsePcapngBinary
+
+// ── mDNS / SSDP / LLMNR / NetBIOS enrichment ─────────────────────────────
+
+/** Create or retrieve enrichment record for a MAC address. */
+function getOrCreateEnrichment(mac, enrichmentData) {
+  if (!enrichmentData[mac]) {
+    enrichmentData[mac] = {
+      deviceName: null, deviceType: null, osHint: null,
+      manufacturer: null, model: null, services: [],
+      enrichmentSource: new Set(),
+    };
+  }
+  return enrichmentData[mac];
+}
+
+function addService(enrich, svc) {
+  if (!enrich.services.includes(svc)) enrich.services.push(svc);
+}
+
+function parseServiceType(nameOrType, enrich) {
+  const n = (nameOrType || '').toLowerCase();
+  if (n.includes('_airplay'))                                       { addService(enrich,'AirPlay');       enrich.deviceType = enrich.deviceType || 'apple_tv'; }
+  if (n.includes('_raop'))                                          { addService(enrich,'AirPlay Audio'); enrich.deviceType = enrich.deviceType || 'smart_speaker'; }
+  if (n.includes('_googlecast') || n.includes('chromecast'))        { addService(enrich,'Chromecast');    enrich.deviceType = enrich.deviceType || 'streaming_device'; }
+  if (n.includes('_sonos') || n.includes('sonos'))                  { addService(enrich,'Sonos');         enrich.deviceType = enrich.deviceType || 'smart_speaker'; }
+  if (n.includes('_ssh'))                                           { addService(enrich,'SSH');           enrich.deviceType = enrich.deviceType || 'server'; }
+  if (n.includes('_smb') || n.includes('_afpovertcp') || n.includes('_nfs')) { addService(enrich,'File Share'); enrich.deviceType = enrich.deviceType || 'nas'; }
+  if (n.includes('_ipp') || n.includes('_pdl-datastream') || n.includes('printer')) { addService(enrich,'Printing'); enrich.deviceType = enrich.deviceType || 'printer'; }
+  if (n.includes('_homekit') || n.includes('_hap'))                 { addService(enrich,'HomeKit');       enrich.deviceType = enrich.deviceType || 'smart_home'; }
+  if (n.includes('_matter'))                                        { addService(enrich,'Matter');        enrich.deviceType = enrich.deviceType || 'smart_home'; }
+  if (n.includes('mediarenderer') || n.includes('mediaplayer'))     { addService(enrich,'UPnP Media');    enrich.deviceType = enrich.deviceType || 'streaming_device'; }
+  if (n.includes('_http') || n.includes('_https'))                  { addService(enrich,'Web'); }
+}
+
+function parseTxtRecords(txtStr, enrich) {
+  const entries = (txtStr || '').split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+  for (const entry of entries) {
+    const eq = entry.indexOf('=');
+    if (eq < 1) continue;
+    const k = entry.substring(0, eq).toLowerCase().trim();
+    const v = entry.substring(eq + 1).trim();
+    if (!v) continue;
+    if (k === 'fn' || k === 'friendly_name')  { if (!enrich.deviceName)   enrich.deviceName   = v; }
+    if (k === 'md' || k === 'model')           { if (!enrich.model)        enrich.model        = v; }
+    if (k === 'manufacturer' || k === 'mfr')   { if (!enrich.manufacturer) enrich.manufacturer = v; }
+    if (k === 'am' || k === 'device_model')    { if (!enrich.model)        enrich.model        = v;
+                                                  if (!enrich.manufacturer) enrich.manufacturer = 'Apple'; }
+    if (k === 'os' || k === 'osvers')          { if (!enrich.osHint) enrich.osHint = v; }
+    if (k === 'fv' || k === 'firmware')        { if (!enrich.osHint) enrich.osHint = `FW ${v}`; }
+  }
+}
+
+function parseSsdpServer(serverHdr, enrich) {
+  if (!serverHdr) return;
+  const parts = serverHdr.split(/\s+/);
+  for (const part of parts) {
+    const slash = part.indexOf('/');
+    const name  = slash >= 0 ? part.substring(0, slash) : part;
+    const ver   = slash >= 0 ? part.substring(slash + 1) : '';
+    const nl    = name.toLowerCase();
+    if (nl === 'linux' || nl === 'windows' || nl === 'darwin' || nl === 'freebsd') {
+      if (!enrich.osHint) enrich.osHint = ver ? `${name}/${ver}` : name;
+    }
+    if (nl === 'sonos')                    { if (!enrich.manufacturer) enrich.manufacturer = 'Sonos';   enrich.deviceType = enrich.deviceType || 'smart_speaker'; }
+    if (nl.includes('samsung'))            { if (!enrich.manufacturer) enrich.manufacturer = 'Samsung'; }
+    if (nl.includes('philips') || nl.includes('hue')) { if (!enrich.manufacturer) enrich.manufacturer = 'Philips'; enrich.deviceType = enrich.deviceType || 'smart_bulb'; }
+    if (nl.includes('ring'))               { if (!enrich.manufacturer) enrich.manufacturer = 'Ring';    enrich.deviceType = enrich.deviceType || 'doorbell'; }
+    if (nl.includes('roku'))               { if (!enrich.manufacturer) enrich.manufacturer = 'Roku';    enrich.deviceType = enrich.deviceType || 'streaming_device'; }
+    if (nl.includes('nest'))               { if (!enrich.manufacturer) enrich.manufacturer = 'Google';  enrich.deviceType = enrich.deviceType || 'smart_home'; }
+    if (nl.includes('amazon') || nl.includes('echo') || nl.includes('alexa')) {
+      if (!enrich.manufacturer) enrich.manufacturer = 'Amazon'; enrich.deviceType = enrich.deviceType || 'smart_speaker';
+    }
+  }
+  if (!enrich.manufacturer && parts[0] && parts[0].length < 40) {
+    const first = parts[0].split('/')[0];
+    const fl    = first.toLowerCase();
+    if (!fl.startsWith('upnp') && !fl.startsWith('http') && !fl.startsWith('microsoft')) {
+      enrich.manufacturer = first;
+    }
+  }
+}
+
+function enrichDevice(layers, srcMac, srcPort, dstPort, enrichmentData) {
+  if (!srcMac) return;
+
+  // mDNS (port 5353)
+  if (srcPort === 5353 || dstPort === 5353) {
+    const enrich  = getOrCreateEnrichment(srcMac, enrichmentData);
+    const qname   = layers.dns?.['dns.qry.name']        || '';
+    const ptrName = layers.dns?.['dns.ptr.domain_name'] || '';
+    const txtStr  = layers.dns?.['dns.txt'] || layers.dns?.['dns.resp.txt'] || '';
+    if (ptrName) {
+      const m = ptrName.match(/^(.+?)\._/);
+      if (m && !enrich.deviceName) enrich.deviceName = m[1].trim();
+      parseServiceType(ptrName, enrich);
+    }
+    if (qname) {
+      parseServiceType(qname, enrich);
+      if (qname.endsWith('.local')) {
+        const m = qname.match(/^([^_][^.]+)\._/);
+        if (m && !enrich.deviceName) enrich.deviceName = m[1].trim();
+      }
+    }
+    if (txtStr) parseTxtRecords(txtStr, enrich);
+    enrich.enrichmentSource.add('mDNS');
+  }
+
+  // SSDP (port 1900)
+  if (srcPort === 1900 || dstPort === 1900) {
+    const enrich    = getOrCreateEnrichment(srcMac, enrichmentData);
+    const serverHdr = layers.ssdp?.['ssdp.server'] || layers.http?.['http.server'] || '';
+    const usn       = layers.ssdp?.['ssdp.usn'] || '';
+    const nt        = layers.ssdp?.['ssdp.nt']  || '';
+    if (serverHdr) parseSsdpServer(serverHdr, enrich);
+    if (usn) { const m = usn.match(/urn:.*:device:(\w+):/i); if (m) parseServiceType(m[1], enrich); }
+    if (nt)  parseServiceType(nt, enrich);
+    enrich.enrichmentSource.add('SSDP');
+  }
+
+  // LLMNR (port 5355)
+  if (srcPort === 5355 || dstPort === 5355) {
+    const enrich = getOrCreateEnrichment(srcMac, enrichmentData);
+    const qname  = layers.dns?.['dns.qry.name'] || layers.llmnr?.['dns.qry.name'] || '';
+    if (qname && !qname.includes('.') && !enrich.deviceName) enrich.deviceName = qname;
+    enrich.enrichmentSource.add('LLMNR');
+  }
+
+  // NetBIOS (port 137)
+  if (srcPort === 137 || dstPort === 137) {
+    const enrich = getOrCreateEnrichment(srcMac, enrichmentData);
+    const nbName = layers.nbns?.['nbns.name'] || '';
+    if (nbName && !enrich.deviceName) enrich.deviceName = nbName.replace(/\s*<\d+>\s*$/, '').trim();
+    enrich.enrichmentSource.add('NetBIOS');
+  }
+}
+
+function generateFindings(enrichmentData, devices) {
+  const findings = [];
+  for (const [mac, enrich] of Object.entries(enrichmentData)) {
+    const sources    = [...enrich.enrichmentSource];
+    const device     = devices[mac];
+    const label      = enrich.deviceName || device?.hostname || device?.nickname || mac;
+    const hasDetails = enrich.model || enrich.osHint || enrich.manufacturer;
+
+    if (sources.includes('mDNS') && hasDetails) {
+      const bits = [enrich.manufacturer, enrich.model, enrich.osHint].filter(Boolean).join(' · ');
+      findings.push({
+        id: 'PRIV_MDNS_001', severity: 'info',
+        title: `"${label}" is broadcasting device details via mDNS`,
+        description: `${label} (MAC: ${mac}) is broadcasting its full device name and hardware details (${bits}) to every device on the network via mDNS. This reveals exactly what type of device it is, who manufactured it, and what software version it runs. An attacker on the same Wi-Fi can use this information to look up known CVEs for this specific device model and OS version, then target it with a tailored exploit.`,
+        device: mac,
+        fix: 'Normal on home networks. On public Wi-Fi, disable mDNS/Bonjour advertising in device settings.',
+        standard: 'RFC 6762',
+      });
+    }
+
+    if (sources.includes('mDNS') && enrich.services.length > 0) {
+      const svcList = enrich.services.join(', ');
+      findings.push({
+        id: 'INFO_MDNS_002', severity: 'info',
+        title: `"${label}" offers: ${svcList}`,
+        description: `${label} (MAC: ${mac}) is advertising ${enrich.services.length} active service${enrich.services.length > 1 ? 's' : ''} over mDNS: ${svcList}. Service advertisements are visible to every device on the network segment and reveal exactly what protocols and software are running. Attackers use this to identify high-value targets — for example, an exposed SSH or File Share service is a direct entry point for brute-force or exploit attempts.`,
+        device: mac,
+        fix: 'No action required on a trusted home network. Disable unused services on the device to reduce your attack surface.',
+        standard: 'RFC 6762 / RFC 6763',
+      });
+    }
+
+    if (sources.includes('SSDP')) {
+      const who = [enrich.manufacturer, enrich.model].filter(Boolean).join(' ');
+      findings.push({
+        id: 'PRIV_SSDP_001', severity: 'info',
+        title: `"${label}" advertising via UPnP/SSDP${who ? ` (${who})` : ''}`,
+        description: `${label} (MAC: ${mac}) is advertising its ${who ? `manufacturer and model (${who}) ` : 'capabilities '}over UPnP/SSDP to every device on the network. Anyone on this Wi-Fi can see exact hardware details and look up known vulnerabilities for this specific device model. UPnP also lets the device silently open inbound ports on your router without your knowledge, potentially exposing it directly to the internet.`,
+        device: mac,
+        fix: 'Disable UPnP on your router unless a specific application requires it. Look for a UPnP or NAT-PMP toggle in your router admin panel.',
+        standard: 'UPnP Device Architecture 2.0',
+      });
+    }
+
+    if (sources.includes('NetBIOS') && enrich.deviceName) {
+      findings.push({
+        id: 'INFO_NBNS_001', severity: 'info',
+        title: `Windows device identified: "${enrich.deviceName}"`,
+        description: `${label} (MAC: ${mac}) is broadcasting its Windows hostname "${enrich.deviceName}" over NetBIOS to the entire network segment. This leaks the device's network identity and Windows machine name. Attackers use NetBIOS name broadcasts to map the network, identify Windows machines, and select them as targets for Windows-specific exploits, lateral movement, or credential relay attacks.`,
+        device: mac,
+        fix: 'Disable NetBIOS over TCP/IP in Network Adapter Settings → Advanced → WINS tab to stop these broadcasts.',
+        standard: 'RFC 1002',
+      });
+    }
+  }
+  return findings;
 }
