@@ -158,6 +158,7 @@ self.onmessage = async function (e) {
 
     // ── v2.1 IoT + GeoIP tracking ──────────────────
     const mqttUnencryptedDevices = new Set();
+    const coapUnencryptedDevices = new Set();
     const upnpDevices = new Set();
     const oddHoursDevices = new Set();
     const foreignConnections = Object.create(null); // mac → { countryCode: { count, flag } }
@@ -433,6 +434,11 @@ self.onmessage = async function (e) {
         const key = srcMac || srcIp || 'unknown';
         mqttUnencryptedDevices.add(key);
       }
+      if (dstPort === 5683 || srcPort === 5683) {
+        // Unencrypted CoAP — cleartext IoT telemetry
+        const key = srcMac || srcIp || 'unknown';
+        coapUnencryptedDevices.add(key);
+      }
       if (dstPort === 1900 || srcPort === 1900) {
         // UPnP/SSDP — devices advertising port-opening
         const key = srcMac || srcIp || 'unknown';
@@ -607,7 +613,7 @@ self.onmessage = async function (e) {
 
     // ── Structured findings from enrichment ────────
     self.postMessage({ type: "progress", value: 93, label: "Generating findings…" });
-    const findings = generateFindings(enrichmentData, devices);
+    const findings = generateFindings(enrichmentData, devices, mqttUnencryptedDevices, coapUnencryptedDevices);
 
     // ── Final assembly ──────────────────────────────
     const deviceList = Object.values(devices).map(d => {
@@ -1380,8 +1386,29 @@ function enrichDevice(layers, srcMac, srcPort, dstPort, enrichmentData) {
   }
 }
 
-function generateFindings(enrichmentData, devices) {
+function generateFindings(enrichmentData, devices, mqttUnencryptedDevices = new Set(), coapUnencryptedDevices = new Set()) {
   const findings = [];
+
+  // ── IOT_TEL_001: Cleartext IoT Telemetry (MQTT / CoAP) ──────────────
+  const allTelemetryDevices = new Set([...mqttUnencryptedDevices, ...coapUnencryptedDevices]);
+  for (const mac of allTelemetryDevices) {
+    const enrich = enrichmentData[mac] || {};
+    const device = devices[mac] || {};
+    const label = enrich.deviceName || device.hostname || device.nickname || mac;
+    const protocols = [];
+    if (mqttUnencryptedDevices.has(mac)) protocols.push('MQTT (TCP 1883)');
+    if (coapUnencryptedDevices.has(mac)) protocols.push('CoAP (UDP 5683)');
+    const protocolStr = protocols.join(' and ');
+    findings.push({
+      id: 'IOT_TEL_001',
+      severity: 'critical',
+      title: `"${label}" sending unencrypted telemetry via ${protocolStr}`,
+      description: `${label} (MAC: ${mac}) is transmitting smart home state data in cleartext using ${protocolStr}. Messages may include sensor readings, lock status, motion events, or thermostat settings. Any device on the same Wi-Fi — including a compromised guest device — can silently read this stream and map your physical habits and home state in real-time.`,
+      device: mac,
+      fix: `Switch MQTT to TLS on port 8883${coapUnencryptedDevices.has(mac) ? ' and CoAP to DTLS on port 5684' : ''}. If the device firmware does not support encryption, isolate it on a dedicated IoT VLAN that blocks access to your main network.`,
+      standard: 'MQTT v5.0 / OASIS — NIST SP 800-213',
+    });
+  }
   for (const [mac, enrich] of Object.entries(enrichmentData)) {
     const sources    = [...enrich.enrichmentSource];
     const device     = devices[mac];
