@@ -13,6 +13,8 @@ SniffPal is a local-first network intelligence tool. Drop in a packet capture an
 - **Security findings** — structured findings with IDs (PRIV_MDNS_001, IOT_TEL_001 etc.)
 - **AI insights** — plain English analysis via Gemini Nano (Chrome) or local fallback
 - **Health Score** — 0–100 network security score with grade
+- **Topology Map** — SVG network map, router in center, devices in ring, colour-coded by Wi-Fi band (2.4 / 5 / 6 GHz)
+- **Band detection** — 2.4 GHz / 5 GHz / 6 GHz per device from monitor mode captures
 - **PDF export** — full report with all devices, findings, traffic breakdown
 - **Zero upload** — 100% client-side, your data never leaves your browser
 
@@ -42,11 +44,18 @@ Open `http://sniffpal.local:8080` — SniffPal captures automatically every 10 m
 
 ## Capture tools
 - **Wireshark** — GUI, any platform
-- **scapy-capture-tool/** — Python script for Pi/Linux (included)
+- **`capture.py`** — managed mode, works on all hardware (default for Pi auto-capture)
+- **`capture_monitor.py`** — monitor mode, requires compatible USB Wi-Fi adapter; captures band data (2.4 / 5 / 6 GHz) per device
 
 ```bash
 cd scapy-capture-tool
+
+# Managed mode (standard)
 sudo python3 capture.py -i wlan0 -t 60
+
+# Monitor mode (band detection)
+sudo airmon-ng start wlan1
+sudo python3 capture_monitor.py -i wlan1mon -c 500
 ```
 
 ## Tech stack
@@ -72,6 +81,8 @@ scapy-capture-tool/  # Python packet capture
 - [x] AI insights (Gemini Nano + local fallback)
 - [x] PDF export
 - [x] Raspberry Pi mode
+- [x] Network Topology Map (SVG, band-aware)
+- [x] Monitor mode capture + 2.4/5/6 GHz band detection
 - [ ] UPnP IGD detection
 - [ ] C2 beacon detection
 - [ ] Docker image

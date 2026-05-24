@@ -9,6 +9,7 @@ import PrivacyReport from './components/PrivacyReport';
 import HealthScore from './components/HealthScore';
 import DataPanel from './components/DataPanel';
 import PrintReport from './components/PrintReport';
+import TopologyMap from './components/TopologyMap';
 import { saveSession, loadSession, clearSession, timeAgo } from './utils/useSession';
 import { calculateHealthScore } from './core/healthScore';
 import { Activity, AlertTriangle, Cpu, Clock } from 'lucide-react';
@@ -694,6 +695,9 @@ export default function App() {
               selfIp={selfIp}
               onGoToDevices={scrollToDevices}
             />
+
+            {/* Topology Map */}
+            <TopologyMap devices={parsedData.devices} />
 
             {/* Security */}
             <SecurityTab

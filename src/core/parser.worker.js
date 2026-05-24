@@ -178,8 +178,13 @@ self.onmessage = async function (e) {
       totalBytes += frameLen;
 
       // Extract addressing once — reused by DNS/SNI/HTTP/Devices/IoT sections
-      const srcMac  = layers?.eth?.["eth.src"] || null;
-      const dstMac  = layers?.eth?.["eth.dst"] || null;
+      // wlan.sa / wlan.da: monitor mode fallback (capture_monitor.py)
+      const srcMac  = layers?.eth?.["eth.src"] || layers?.wlan?.["wlan.sa"] || null;
+      const dstMac  = layers?.eth?.["eth.dst"] || layers?.wlan?.["wlan.da"] || null;
+
+      // Band / frequency from monitor mode captures (null in managed mode — that's fine)
+      const band = layers?.radiotap?.["sniffpal.injected_band"] || null;
+      const freq = layers?.radiotap?.["radiotap.channel.freq"]  || null;
       const srcIp   = layers?.ip?.["ip.src"]   || layers?.ipv6?.["ipv6.src"] || null;
       const dstIp   = layers?.ip?.["ip.dst"]   || layers?.ipv6?.["ipv6.dst"] || null;
       const hostname = layers?.bootp?.["bootp.option.hostname"] || layers?.dhcp?.["dhcp.option.hostname"] || null;
@@ -387,6 +392,7 @@ self.onmessage = async function (e) {
             type: 'unknown',
             ip: null, hostname: null, trafficTypes: {},
             seenPorts: new Set(),
+            band: null, freq: null,   // populated by monitor mode captures
           };
         }
         devices[mac].packets++;
@@ -394,6 +400,9 @@ self.onmessage = async function (e) {
         if (idx === 0 && srcIp && !devices[mac].ip) devices[mac].ip = srcIp;
         if (idx === 1 && dstIp && !devices[mac].ip) devices[mac].ip = dstIp;
         if (hostname && !devices[mac].hostname) devices[mac].hostname = hostname;
+        // Band: set once per device (first seen), source MAC only
+        if (idx === 0 && band && !devices[mac].band) devices[mac].band = band;
+        if (idx === 0 && freq && !devices[mac].freq) devices[mac].freq = freq;
         if (trafficType) {
           devices[mac].trafficTypes[trafficType] = (devices[mac].trafficTypes[trafficType] || 0) + 1;
         }

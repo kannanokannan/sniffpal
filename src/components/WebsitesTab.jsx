@@ -3,7 +3,8 @@ import { useState } from 'react';
 export default function WebsitesTab({ websites, trackers, selfIp, onGoToDevices }) {
   const [hideMyTraffic, setHideMyTraffic] = useState(true);
 
-  if (!websites || websites.length === 0) {
+  const noWebsites = !websites || websites.filter(s => !s.domain?.endsWith('.local')).length === 0;
+  if (noWebsites) {
     return (
       <div className="bg-slate-800/40 backdrop-blur-md border
       border-white/5 rounded-2xl p-12 text-center">
@@ -17,10 +18,13 @@ export default function WebsitesTab({ websites, trackers, selfIp, onGoToDevices 
     );
   }
 
+  // Filter out .local mDNS service names — they belong in device services, not browsing history
+  const filteredWebsites = websites.filter(s => !s.domain?.endsWith('.local'));
+
   // Split sites into mine vs. others
-  const mySites    = selfIp ? websites.filter(s => s.srcIps?.includes(selfIp)) : [];
-  const otherSites = selfIp ? websites.filter(s => !s.srcIps?.includes(selfIp)) : websites;
-  const visibleSites = (selfIp && hideMyTraffic) ? otherSites : websites;
+  const mySites    = selfIp ? filteredWebsites.filter(s => s.srcIps?.includes(selfIp)) : [];
+  const otherSites = selfIp ? filteredWebsites.filter(s => !s.srcIps?.includes(selfIp)) : filteredWebsites;
+  const visibleSites = (selfIp && hideMyTraffic) ? otherSites : filteredWebsites;
 
   const categories = [...new Set(visibleSites.map(w => w.category))];
 
