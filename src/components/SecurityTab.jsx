@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import {
   explainFindings, summarizeSession,
   getAIStatus, initAI, probeStatus,
-} from '../utils/geminiNano.js';
+} from '../core/geminiNano.js';
 
 /** Build instant template explanations from findings — shown before AI loads */
 function buildTemplateExplanations(findings) {

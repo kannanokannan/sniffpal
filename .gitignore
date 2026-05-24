@@ -31,3 +31,11 @@ dist/
 .env.local
 .env.*
 *.key
+
+# Pi server — digest captures (never commit capture data)
+pi/digests/*.json
+
+# Capture JSON files (except package files)
+*.json
+!package.json
+!package-lock.json

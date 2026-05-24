@@ -10,7 +10,7 @@ import HealthScore from './components/HealthScore';
 import DataPanel from './components/DataPanel';
 import PrintReport from './components/PrintReport';
 import { saveSession, loadSession, clearSession, timeAgo } from './utils/useSession';
-import { calculateHealthScore } from './utils/healthScore';
+import { calculateHealthScore } from './core/healthScore';
 import { Activity, AlertTriangle, Cpu, Clock } from 'lucide-react';
 
 export default function App() {
@@ -66,7 +66,7 @@ export default function App() {
     setProgress({ value: 0, label: 'Reading file…' });
 
     const worker = new Worker(
-      new URL('./workers/parser.worker.js', import.meta.url),
+      new URL('./core/parser.worker.js', import.meta.url),
       { type: 'module' }
     );
 

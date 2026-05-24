@@ -2,7 +2,7 @@
 // Runs entirely off the main UI thread
 // Handles 500MB+ files without freezing the browser
 
-import { lookupCountry } from '../utils/geoip.js';
+import { lookupCountry } from './geoip.js';
 
 const TRACKER_DOMAINS = [
   "google-analytics.com", "doubleclick.net",
