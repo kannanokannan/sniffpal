@@ -13,6 +13,9 @@ import { saveSession, loadSession, clearSession, timeAgo } from './utils/useSess
 import { calculateHealthScore } from './core/healthScore';
 import { Activity, AlertTriangle, Cpu, Clock } from 'lucide-react';
 
+const IS_PI_MODE = !window.location.hostname.includes('github.io')
+  && window.location.hostname !== 'localhost';
+
 export default function App() {
   const [parsedData, setParsedData] = useState(null);
   const [progress, setProgress] = useState(null);
@@ -35,12 +38,31 @@ export default function App() {
   );
   const deviceTableRef = useRef(null);
 
+  // ── Pi mode state ─────────────────────────────────
+  const [piStatus, setPiStatus] = useState(null);
+  const [piCapturing, setPiCapturing] = useState(false);
+  const [piSettingsOpen, setPiSettingsOpen] = useState(false);
+  const [piSettings, setPiSettings] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('sniffpal_pi_settings') || 'null')
+        || { interval: 10, interface: 'wlan0' };
+    } catch { return { interval: 10, interface: 'wlan0' }; }
+  });
+  const piPollRef = useRef(null);
+
   // ── Load saved session on startup ─────────────────
   useEffect(() => {
     loadSession().then(session => {
       if (session) setResumeSession(session);
     });
   }, []);
+
+  // ── Pi mode: fetch status on mount + cleanup poll ─
+  useEffect(() => {
+    if (!IS_PI_MODE) return;
+    fetchPiStatus();
+    return () => { if (piPollRef.current) clearInterval(piPollRef.current); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Trust device toggle ───────────────────────────
   const handleTrust = useCallback(async (mac) => {
@@ -124,6 +146,65 @@ export default function App() {
   const scrollToDevices = useCallback(() => {
     deviceTableRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, []);
+
+  // ── Pi mode functions ─────────────────────────────
+  const fetchPiStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      setPiStatus(data);
+    } catch { /* server may not be ready yet */ }
+  }, []);
+
+  const handlePiLoadLatest = useCallback(async () => {
+    try {
+      setProgress({ value: 10, label: 'Fetching latest capture from Pi…' });
+      const res = await fetch('/api/digests/latest');
+      if (!res.ok) {
+        alert('No captures available yet. Start a capture first.');
+        setProgress(null);
+        return;
+      }
+      const data = await res.json();
+      const packets = data.packets || data;
+      const blob = new Blob([JSON.stringify(packets)], { type: 'application/json' });
+      const file = new File(
+        [blob],
+        `pi-capture-${data.timestamp || 'latest'}.json`,
+        { type: 'application/json' }
+      );
+      handleFile(file);
+    } catch (e) {
+      alert('Failed to load capture: ' + e.message);
+      setProgress(null);
+    }
+  }, [handleFile]);
+
+  const handlePiStartCapture = useCallback(async () => {
+    try {
+      await fetch('/api/capture/start', { method: 'POST' });
+      setPiCapturing(true);
+      if (piPollRef.current) clearInterval(piPollRef.current);
+      piPollRef.current = setInterval(fetchPiStatus, 5000);
+    } catch (e) {
+      alert('Failed to start capture: ' + e.message);
+    }
+  }, [fetchPiStatus]);
+
+  const handlePiSaveSettings = useCallback(async () => {
+    localStorage.setItem('sniffpal_pi_settings', JSON.stringify(piSettings));
+    try {
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          interval: piSettings.interval,
+          interface: piSettings.interface,
+        }),
+      });
+    } catch { /* saved locally regardless */ }
+    setPiSettingsOpen(false);
+  }, [piSettings]);
 
   const criticalAlerts = parsedData?.security?.filter(
     a => a.severity === 'critical'
@@ -325,29 +406,186 @@ export default function App() {
               </div>
             )}
 
-            <div className="text-center mb-8">
-              <h2 className="text-3xl font-bold text-white mb-2">
-                Your Network. Instantly Understood.
-              </h2>
-              <p className="text-slate-400 text-sm max-w-md mx-auto">
-                Like Chrome DevTools — but for your entire network.
-                Drop any Wireshark file. 100% local. Never uploaded.
-                <span className="text-green-400"> Zero privacy risk.</span>
-              </p>
-              <div className="flex items-center justify-center
-              gap-4 mt-4 text-xs text-slate-500 flex-wrap">
-                <span>📱 Devices</span>
-                <span>🌐 Websites</span>
-                <span>👁️ Trackers</span>
-                <span>⚠️ Security</span>
-                <span>🏠 IoT</span>
-                <span>📊 Health Score</span>
+            {IS_PI_MODE ? (
+              /* ── Pi Dashboard ─────────────────────── */
+              <div className="w-full max-w-lg space-y-4">
+                <div className="text-center mb-2">
+                  <div className="text-5xl mb-3">📡</div>
+                  <h2 className="text-2xl font-bold text-white">Pi Monitor</h2>
+                  <p className="text-cyan-400 text-sm mt-1">
+                    Connected to SniffPal Pi
+                  </p>
+                </div>
+
+                {/* Status Card */}
+                <div className="bg-slate-800/60 backdrop-blur-md border
+                border-white/10 rounded-2xl p-5">
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className="w-2 h-2 rounded-full bg-green-400
+                    animate-pulse inline-block"/>
+                    <span className="text-green-400 text-sm font-medium">Live</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <p className="text-slate-500 text-xs">Digests stored</p>
+                      <p className="text-white font-medium">
+                        {piStatus?.digests ?? '—'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500 text-xs">Last capture</p>
+                      <p className="text-white font-medium text-xs truncate">
+                        {piStatus?.latest ?? 'None yet'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500 text-xs">Schedule</p>
+                      <p className="text-white font-medium">
+                        Every {piStatus?.settings?.interval ?? piSettings.interval} min
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500 text-xs">Interface</p>
+                      <p className="text-white font-medium">
+                        {piStatus?.settings?.interface ?? piSettings.interface}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Capture Progress */}
+                {piCapturing && (
+                  <div className="bg-blue-900/20 border border-blue-800/40
+                  rounded-2xl p-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-4 h-4 border-2 border-cyan-400
+                      border-t-transparent rounded-full animate-spin
+                      flex-shrink-0"/>
+                      <div>
+                        <p className="text-cyan-400 text-sm font-medium">
+                          Capture running…
+                        </p>
+                        <p className="text-slate-500 text-xs">
+                          Auto-capture every {piSettings.interval} minutes
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Action Buttons */}
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={handlePiStartCapture}
+                    disabled={piCapturing}
+                    className="bg-cyan-600 hover:bg-cyan-500
+                    disabled:bg-slate-700 disabled:text-slate-500
+                    text-white font-medium py-3 px-4 rounded-xl
+                    transition-all flex items-center justify-center gap-2"
+                  >
+                    ▶ Start Capture
+                  </button>
+                  <button
+                    onClick={handlePiLoadLatest}
+                    disabled={!piStatus?.latest}
+                    className="bg-slate-700 hover:bg-slate-600
+                    disabled:bg-slate-800 disabled:text-slate-600
+                    text-white font-medium py-3 px-4 rounded-xl
+                    transition-all flex items-center justify-center gap-2"
+                  >
+                    📂 Load Latest
+                  </button>
+                </div>
+
+                <p className="text-slate-600 text-xs text-center">
+                  Auto-capture every {piSettings.interval} minutes
+                </p>
+
+                {/* Settings Toggle */}
+                <button
+                  onClick={() => setPiSettingsOpen(o => !o)}
+                  className="w-full text-slate-400 hover:text-white text-sm
+                  py-2 transition-colors flex items-center justify-center gap-2"
+                >
+                  ⚙ Settings {piSettingsOpen ? '▲' : '▼'}
+                </button>
+
+                {/* Settings Panel */}
+                {piSettingsOpen && (
+                  <div className="bg-slate-800/60 border border-white/10
+                  rounded-2xl p-5 space-y-4">
+                    <div>
+                      <label className="text-slate-400 text-xs block mb-1">
+                        Capture Interval
+                      </label>
+                      <select
+                        value={piSettings.interval}
+                        onChange={e => setPiSettings(s =>
+                          ({ ...s, interval: Number(e.target.value) })
+                        )}
+                        className="w-full bg-slate-700 border border-white/10
+                        text-white text-sm rounded-lg px-3 py-2"
+                      >
+                        <option value={5}>5 minutes</option>
+                        <option value={10}>10 minutes</option>
+                        <option value={30}>30 minutes</option>
+                        <option value={60}>1 hour</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-slate-400 text-xs block mb-1">
+                        Network Interface
+                      </label>
+                      <input
+                        type="text"
+                        value={piSettings.interface}
+                        onChange={e => setPiSettings(s =>
+                          ({ ...s, interface: e.target.value })
+                        )}
+                        className="w-full bg-slate-700 border border-white/10
+                        text-white text-sm rounded-lg px-3 py-2"
+                        placeholder="wlan0"
+                      />
+                    </div>
+                    <button
+                      onClick={handlePiSaveSettings}
+                      className="w-full bg-cyan-600 hover:bg-cyan-500
+                      text-white font-medium py-2 rounded-xl
+                      transition-all text-sm"
+                    >
+                      Save Settings
+                    </button>
+                  </div>
+                )}
               </div>
-            </div>
-            <FileUpload onFile={handleFile} />
-            <p className="mt-6 text-slate-600 text-xs">
-              Wireshark: File → Export Packet Dissections → As JSON
-            </p>
+            ) : (
+              /* ── Web upload mode ──────────────────── */
+              <>
+                <div className="text-center mb-8">
+                  <h2 className="text-3xl font-bold text-white mb-2">
+                    Your Network. Instantly Understood.
+                  </h2>
+                  <p className="text-slate-400 text-sm max-w-md mx-auto">
+                    Like Chrome DevTools — but for your entire network.
+                    Drop any Wireshark file. 100% local. Never uploaded.
+                    <span className="text-green-400"> Zero privacy risk.</span>
+                  </p>
+                  <div className="flex items-center justify-center
+                  gap-4 mt-4 text-xs text-slate-500 flex-wrap">
+                    <span>📱 Devices</span>
+                    <span>🌐 Websites</span>
+                    <span>👁️ Trackers</span>
+                    <span>⚠️ Security</span>
+                    <span>🏠 IoT</span>
+                    <span>📊 Health Score</span>
+                  </div>
+                </div>
+                <FileUpload onFile={handleFile} />
+                <p className="mt-6 text-slate-600 text-xs">
+                  Wireshark: File → Export Packet Dissections → As JSON
+                </p>
+              </>
+            )}
           </div>
         )}
 

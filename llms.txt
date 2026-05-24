@@ -1,0 +1,45 @@
+# SniffPal — LLM Context File
+# This file helps AI assistants understand the codebase quickly.
+
+## What this project is
+SniffPal is a browser-based network intelligence tool. It parses packet captures (Wireshark JSON or scapy output) and shows device analysis, security findings, and a health score. 100% client-side — no backend for the web version.
+
+## Two modes
+1. Web mode — user uploads a capture file, analysis runs in browser
+2. Pi mode — Flask server on Raspberry Pi serves the app + captures automatically
+
+## Key architectural decisions
+- Parser runs in a Web Worker (src/core/parser.worker.js) — never blocks UI
+- src/core/ = shared logic for all distributions (web, pi, future android)
+- src/components/ = React UI, web-only
+- pi/ = Flask server, Pi-only
+- scapy-capture-tool/ = Python capture script, Pi/Linux
+
+## Detection rules (finding IDs)
+- PRIV_MDNS_001 — mDNS name/service broadcast
+- PRIV_SSDP_001 — SSDP UPnP discovery
+- PRIV_LLMNR_001 — LLMNR hostname broadcast
+- PRIV_NBNS_001 — NetBIOS name broadcast
+- IOT_TEL_001 — MQTT cleartext (TCP 1883) or CoAP (UDP 5683)
+- IOT_UPNP_002 — UPnP IGD port punching (planned)
+- IOT_C2_001 — C2 beacon / no-DNS outbound (planned)
+
+## Pi server API
+- GET  /api/status          — server status + settings
+- GET  /api/digests         — last 48 digests
+- GET  /api/digests/latest  — most recent capture
+- POST /api/capture/start   — trigger manual capture
+- GET  /api/settings        — current settings
+- POST /api/settings        — update interval + interface
+
+## Tech constraints (do not change)
+- Vite pinned at 5.4.1 — v6/v8 caused breakage
+- Tailwind v3 — v4 uses different CSS syntax, breaks build
+- No new heavy npm dependencies without checking bundle size first
+- scapy requires sudo on Linux for raw sockets
+
+## Current version
+v2.1.1 — Pi mode UI, src/core/ restructure, PDF fix, Pi server
+
+## Repo
+https://github.com/kannanokannan/sniffpal
