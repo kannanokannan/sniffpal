@@ -13,7 +13,7 @@ SniffPal is a local-first network intelligence tool. Drop in a packet capture an
 - **Security findings** — structured findings with IDs (PRIV_MDNS_001, IOT_TEL_001 etc.)
 - **AI insights** — plain English analysis via Gemini Nano (Chrome) or local fallback
 - **Health Score** — 0–100 network security score with grade
-- **Topology Map** — SVG network map, router in center, devices in ring, colour-coded by Wi-Fi band (2.4 / 5 / 6 GHz)
+- **Topology Map** — SVG network map, clustered star layout (IoT / Mobile / Network / Computer), router auto-detected, animated data flow lines, colour-coded by Wi-Fi band (2.4 / 5 / 6 GHz), click-to-inspect any node
 - **Band detection** — 2.4 GHz / 5 GHz / 6 GHz per device from monitor mode captures
 - **PDF export** — full report with all devices, findings, traffic breakdown
 - **Zero upload** — 100% client-side, your data never leaves your browser
