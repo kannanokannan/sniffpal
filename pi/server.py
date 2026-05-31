@@ -12,10 +12,15 @@ Access:
     http://<pi-ip>:8080
 """
 
-from flask import Flask, jsonify, send_from_directory, request
-import os, json, glob, subprocess, threading, sys
+from flask import Flask, jsonify, send_from_directory, request, Response
+import os, json, glob, subprocess, threading, sys, time
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
+
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 app = Flask(__name__, static_folder='../dist', static_url_path='')
 
@@ -23,6 +28,17 @@ DIGEST_DIR    = os.path.join(os.path.dirname(__file__), 'digests')
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), 'settings.json')
 MAX_DIGESTS   = 48
 os.makedirs(DIGEST_DIR, exist_ok=True)
+capture_lock = threading.Lock()
+capture_state = {
+    'running': False,
+    'startedAt': None,
+    'finishedAt': None,
+    'packets': 0,
+    'devices': 0,
+    'protocols': {},
+    'lastMessage': None,
+    'error': None,
+}
 
 DEFAULT_SETTINGS = {
     'interval':  10,     # minutes
@@ -127,8 +143,23 @@ def update_settings():
 
 @app.route('/api/capture/start', methods=['POST'])
 def start_capture():
+    with capture_lock:
+        if capture_state['running']:
+            return jsonify({'status': 'already_running', 'capture': dict(capture_state)})
     threading.Thread(target=run_capture, daemon=True).start()
     return jsonify({'status': 'started'})
+
+@app.route('/api/capture/events')
+def capture_events():
+    def stream():
+        while True:
+            with capture_lock:
+                state = dict(capture_state)
+            yield f"data: {json.dumps(state)}\n\n"
+            if not state.get('running'):
+                break
+            time.sleep(1)
+    return Response(stream(), mimetype='text/event-stream')
 
 # ── API: server status ───────────────────────────────────────────────────────
 
@@ -136,19 +167,54 @@ def start_capture():
 def status():
     settings = load_settings()
     files = sorted(glob.glob(os.path.join(DIGEST_DIR, '*.json')), reverse=True)
+    with capture_lock:
+        capture = dict(capture_state)
     return jsonify({
         'status':     'running',
         'digests':    len(files),
         'latest':     os.path.basename(files[0]) if files else None,
         'maxDigests': MAX_DIGESTS,
         'settings':   settings,
+        'capture':    capture,
+        'system':     get_system_metrics(),
     })
+
+def get_system_metrics():
+    if psutil is None:
+        return None
+    try:
+        net = psutil.net_io_counters()
+        mem = psutil.virtual_memory()
+        return {
+            'cpuPercent': psutil.cpu_percent(interval=None),
+            'ramPercent': mem.percent,
+            'ramUsedMB': round(mem.used / 1024 / 1024),
+            'ramTotalMB': round(mem.total / 1024 / 1024),
+            'netSentMB': round(net.bytes_sent / 1024 / 1024, 1),
+            'netRecvMB': round(net.bytes_recv / 1024 / 1024, 1),
+        }
+    except Exception:
+        return None
 
 # ── Capture + digest ─────────────────────────────────────────────────────────
 
 def run_capture():
     """Run a capture using current settings and store the digest."""
     import tempfile
+
+    with capture_lock:
+        if capture_state['running']:
+            return
+        capture_state.update({
+            'running': True,
+            'startedAt': datetime.now().isoformat(),
+            'finishedAt': None,
+            'packets': 0,
+            'devices': 0,
+            'protocols': {},
+            'lastMessage': 'Starting capture',
+            'error': None,
+        })
 
     settings = load_settings()
     iface    = settings['interface']
@@ -168,11 +234,49 @@ def run_capture():
         if hasattr(os, 'geteuid') and os.geteuid() != 0:
             capture_cmd = ['sudo', *capture_cmd]
 
-        subprocess.run(
+        proc = subprocess.Popen(
             capture_cmd,
-            check=True,
-            timeout=duration + 60,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
         )
+        deadline = time.time() + duration + 60
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            print(line, flush=True)
+            if line.startswith('SNIFFPAL_PROGRESS '):
+                try:
+                    progress = json.loads(line.replace('SNIFFPAL_PROGRESS ', '', 1))
+                    with capture_lock:
+                        capture_state.update({
+                            'packets': progress.get('packets', capture_state['packets']),
+                            'devices': progress.get('devices', capture_state['devices']),
+                            'protocols': progress.get('protocols', capture_state['protocols']),
+                            'lastMessage': f"{progress.get('packets', 0)} packets captured",
+                        })
+                except Exception:
+                    pass
+            elif 'Captured ' in line and ' packets' in line:
+                try:
+                    count = int(line.split('Captured ', 1)[1].split(' packets', 1)[0])
+                    with capture_lock:
+                        capture_state['packets'] = count
+                        capture_state['lastMessage'] = line
+                except Exception:
+                    pass
+            else:
+                with capture_lock:
+                    capture_state['lastMessage'] = line
+            if time.time() > deadline:
+                proc.kill()
+                raise subprocess.TimeoutExpired(capture_cmd, duration + 60)
+
+        rc = proc.wait(timeout=5)
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, capture_cmd)
 
         with open(raw_path) as f:
             raw = json.load(f)
@@ -189,6 +293,12 @@ def run_capture():
             json.dump(digest, f)
 
         print(f'[SniffPal Pi] Saved digest: digest-{ts}.json ({len(raw)} packets)', flush=True)
+        with capture_lock:
+            capture_state.update({
+                'packets': len(raw),
+                'lastMessage': f'Saved digest: digest-{ts}.json',
+                'error': None,
+            })
 
         # Enforce max 48 digests — delete oldest
         files = sorted(glob.glob(os.path.join(DIGEST_DIR, '*.json')))
@@ -198,13 +308,25 @@ def run_capture():
 
     except subprocess.CalledProcessError as e:
         print(f'[SniffPal Pi] Capture failed: {e}', flush=True)
+        with capture_lock:
+            capture_state['error'] = 'Capture failed. Start the Pi server with sudo so Scapy can read packets.'
+            capture_state['lastMessage'] = capture_state['error']
     except subprocess.TimeoutExpired:
         print(f'[SniffPal Pi] Capture timed out', flush=True)
+        with capture_lock:
+            capture_state['error'] = 'Capture timed out'
+            capture_state['lastMessage'] = 'Capture timed out'
     except Exception as e:
         print(f'[SniffPal Pi] Error: {e}', flush=True)
+        with capture_lock:
+            capture_state['error'] = str(e)
+            capture_state['lastMessage'] = str(e)
     finally:
         if os.path.exists(raw_path):
             os.remove(raw_path)
+        with capture_lock:
+            capture_state['running'] = False
+            capture_state['finishedAt'] = datetime.now().isoformat()
 
 # ── Scheduler: use saved settings interval ───────────────────────────────────
 

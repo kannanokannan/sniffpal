@@ -160,6 +160,7 @@ self.onmessage = async function (e) {
     const mqttUnencryptedDevices = new Set();
     const coapUnencryptedDevices = new Set();
     const upnpDevices = new Set();
+    const igdPortMappings = new Map();
     const oddHoursDevices = new Set();
     const foreignConnections = Object.create(null); // mac → { countryCode: { count, flag } }
     const ipGeoCache = Object.create(null);          // dstIp → lookupCountry result (cache)
@@ -453,6 +454,13 @@ self.onmessage = async function (e) {
         const key = srcMac || srcIp || 'unknown';
         upnpDevices.add(key);
       }
+      if (detectIgdPortMapping(layers, dstIp)) {
+        const key = srcMac || srcIp || 'unknown';
+        if (!igdPortMappings.has(key)) {
+          igdPortMappings.set(key, { mac: srcMac, ip: srcIp, routerIp: dstIp, count: 0 });
+        }
+        igdPortMappings.get(key).count++;
+      }
 
       // ── v2.1: Odd-hours traffic (2am–5am local) ───
       if (timeEpoch > 0 && srcMac) {
@@ -488,7 +496,7 @@ self.onmessage = async function (e) {
     self.postMessage({ type: "progress", value: 90, label: "Running security checks..." });
 
     Object.entries(arpReplies).forEach(([mac, data]) => {
-      if (data.count > 50) {
+      if (data.count > 50 && data.ips.size > 1) {
         securityAlerts.push({
           severity: "critical", icon: "🔴",
           title: `ARP Flood — ${data.count} replies`,
@@ -622,7 +630,7 @@ self.onmessage = async function (e) {
 
     // ── Structured findings from enrichment ────────
     self.postMessage({ type: "progress", value: 93, label: "Generating findings…" });
-    const findings = generateFindings(enrichmentData, devices, mqttUnencryptedDevices, coapUnencryptedDevices);
+    const findings = generateFindings(enrichmentData, devices, mqttUnencryptedDevices, coapUnencryptedDevices, igdPortMappings);
 
     // ── Final assembly ──────────────────────────────
     const deviceList = Object.values(devices).map(d => {
@@ -970,7 +978,7 @@ function addTransportLayer(data, off, proto, layers) {
     const dp = (data[off+2]<<8)|data[off+3];
     layers.tcp = { 'tcp.srcport': String(sp), 'tcp.dstport': String(dp) };
     if (sp===443||dp===443||sp===8443||dp===8443) layers.tls = {};
-    if (sp===80||dp===80) layers.http = {};
+    if (sp===80||dp===80) addHttpLayer(data, off, layers);
 
   } else if (proto === 17) { // UDP
     if (data.length < off + 8) return;
@@ -988,6 +996,27 @@ function addTransportLayer(data, off, proto, layers) {
     if (data.length < off + 2) return;
     layers.icmp = { 'icmp.type': String(data[off]), 'icmp.code': String(data[off+1]) };
   }
+}
+
+function addHttpLayer(data, tcpOff, layers) {
+  layers.http = {};
+  const dataOffset = ((data[tcpOff + 12] >> 4) & 0x0f) * 4;
+  const payloadOff = tcpOff + dataOffset;
+  if (payloadOff >= data.length) return;
+  const payloadLen = Math.min(data.length - payloadOff, 2048);
+  let text = '';
+  for (let i = 0; i < payloadLen; i++) {
+    const b = data[payloadOff + i];
+    if (b >= 32 && b <= 126) text += String.fromCharCode(b);
+    else if (b === 10 || b === 13 || b === 9) text += '\n';
+  }
+  if (!text) return;
+  const firstLine = text.split(/\r?\n/, 1)[0] || '';
+  const method = firstLine.split(/\s+/, 1)[0];
+  if (method) layers.http['http.request.method'] = method;
+  const host = text.match(/\nhost:\s*([^\r\n]+)/i);
+  if (host) layers.http['http.host'] = host[1].trim();
+  layers.http['http.file_data'] = text.slice(0, 2048);
 }
 
 function addDnsLayer(data, off, layers) {
@@ -1395,7 +1424,32 @@ function enrichDevice(layers, srcMac, srcPort, dstPort, enrichmentData) {
   }
 }
 
-function generateFindings(enrichmentData, devices, mqttUnencryptedDevices = new Set(), coapUnencryptedDevices = new Set()) {
+function detectIgdPortMapping(layers, dstIp) {
+  if (!layers?.http || !dstIp || !isPrivateIpv4(dstIp)) return false;
+  const method = layers.http?.['http.request.method'];
+  if (method && method !== 'POST') return false;
+  const text = flattenLayerValues(layers).toLowerCase();
+  return text.includes('addportmapping') ||
+    (text.includes('wanipconnection') && text.includes('soap'));
+}
+
+function flattenLayerValues(value) {
+  if (value == null) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return value.map(flattenLayerValues).join(' ');
+  if (typeof value === 'object') return Object.values(value).map(flattenLayerValues).join(' ');
+  return '';
+}
+
+function isPrivateIpv4(ip) {
+  const parts = String(ip || '').split('.').map(Number);
+  if (parts.length !== 4 || parts.some(n => Number.isNaN(n))) return false;
+  return parts[0] === 10 ||
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+    (parts[0] === 192 && parts[1] === 168);
+}
+
+function generateFindings(enrichmentData, devices, mqttUnencryptedDevices = new Set(), coapUnencryptedDevices = new Set(), igdPortMappings = new Map()) {
   const findings = [];
 
   // ── IOT_TEL_001: Cleartext IoT Telemetry (MQTT / CoAP) ──────────────
@@ -1470,6 +1524,21 @@ function generateFindings(enrichmentData, devices, mqttUnencryptedDevices = new 
         standard: 'RFC 1002',
       });
     }
+  }
+  for (const [key, mapping] of igdPortMappings.entries()) {
+    const mac = mapping.mac || key;
+    const enrich = enrichmentData[mac] || {};
+    const device = devices[mac] || {};
+    const label = enrich.deviceName || device.hostname || device.nickname || device.vendor || mapping.ip || mac;
+    findings.push({
+      id: 'IOT_UPNP_002',
+      severity: 'critical',
+      title: `"${label}" requested router port forwarding`,
+      description: `${label} (MAC: ${mac}) sent ${mapping.count} UPnP IGD AddPortMapping request${mapping.count > 1 ? 's' : ''} to the router${mapping.routerIp ? ` at ${mapping.routerIp}` : ''}. This means the device may be asking the router to open an inbound internet port automatically. If abused by malware or a vulnerable IoT device, attackers outside the home could reach services that should have stayed private.`,
+      device: mac,
+      fix: 'Disable UPnP/IGD on the router, then manually allow only the ports you trust and understand.',
+      standard: 'UPnP IGD / NIST SP 800-41',
+    });
   }
   return findings;
 }

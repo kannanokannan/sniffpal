@@ -16,6 +16,7 @@ SniffPal is a local-first network intelligence tool. Drop in a packet capture an
 - **AI insights** - plain-English explanations via Chrome on-device AI or local fallback templates
 - **Health Score** - 0-100 network security score with grade
 - **Topology Map** - larger clustered star map with animated links, device clusters, Wi-Fi band rings, click-to-inspect cards, and inferred gateway detection when the real router is not directly seen in the capture
+- **Pi live monitor** - capture progress, packet count, device count, protocol mix, CPU, RAM, and network I/O while the Pi is running
 - **Band detection** - 2.4 GHz / 5 GHz / 6 GHz per device from monitor mode captures
 - **PDF export** - full installer-style report with devices, findings, traffic, and recommendations
 - **Zero upload** - capture data never leaves your machine
@@ -48,6 +49,8 @@ Packet capture needs raw network access on Linux, so start the Pi server with `s
 - Auto-capture on a schedule: 5 / 10 / 30 / 60 minutes
 - Digest storage for the last 48 captures
 - One-click manual capture
+- Live capture progress with packets, devices, and protocols while capture is running
+- Live Pi system metrics: CPU, RAM, and network I/O
 - Browser-based analysis; the Pi captures and serves data locally
 - Topology map uses capture data to show device clusters and gateway relationships
 
@@ -97,10 +100,9 @@ scapy-capture-tool/    Python packet capture tools
 - [x] Raspberry Pi mode
 - [x] Network Topology Map with clustered layout and inferred gateway
 - [x] Monitor mode capture with 2.4 / 5 / 6 GHz band detection
-- [ ] UPnP IGD detection
+- [x] Pi live capture progress and system metrics
+- [x] UPnP IGD AddPortMapping detection
 - [ ] C2 beacon detection
-- [ ] Live WebSocket capture progress
-- [ ] Pi system metrics in monitor dashboard
 - [ ] Historical baseline and trend view
 
 ## License

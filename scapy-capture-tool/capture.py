@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import signal
+from collections import Counter
 from datetime import datetime
 
 try:
@@ -32,6 +33,8 @@ except ImportError:
 # ── Global packet store (allows KeyboardInterrupt save) ──────────────────────
 captured_packets = []
 capture_done = False
+seen_devices = set()
+protocol_counts = Counter()
 
 
 def get_default_interface():
@@ -284,13 +287,54 @@ def packet_to_wireshark(pkt, pkt_num):
     return {'_source': {'layers': layers}}
 
 
+def detect_protocol(pkt):
+    if TCP in pkt:
+        sport, dport = pkt[TCP].sport, pkt[TCP].dport
+        if sport == 80 or dport == 80:
+            return 'HTTP'
+        if sport in (443, 8443) or dport in (443, 8443):
+            return 'TLS'
+        if sport == 1883 or dport == 1883:
+            return 'MQTT'
+        return 'TCP'
+    if UDP in pkt:
+        sport, dport = pkt[UDP].sport, pkt[UDP].dport
+        if sport in (53, 5353, 5355) or dport in (53, 5353, 5355):
+            return 'DNS'
+        if sport == 1900 or dport == 1900:
+            return 'SSDP'
+        if sport == 5683 or dport == 5683:
+            return 'CoAP'
+        return 'UDP'
+    if ARP in pkt:
+        return 'ARP'
+    if ICMP in pkt:
+        return 'ICMP'
+    return 'Other'
+
+
 def packet_handler(pkt):
     """Called by Scapy for each captured packet."""
-    global captured_packets
+    global captured_packets, seen_devices, protocol_counts
     pkt_num = len(captured_packets) + 1
     try:
         entry = packet_to_wireshark(pkt, pkt_num)
         captured_packets.append(entry)
+        if Ether in pkt:
+            if pkt[Ether].src:
+                seen_devices.add(pkt[Ether].src)
+            if pkt[Ether].dst:
+                seen_devices.add(pkt[Ether].dst)
+        protocol_counts[detect_protocol(pkt)] += 1
+        if pkt_num % 50 == 0:
+            print(
+                'SNIFFPAL_PROGRESS ' + json.dumps({
+                    'packets': pkt_num,
+                    'devices': len(seen_devices),
+                    'protocols': dict(protocol_counts.most_common(6)),
+                }),
+                flush=True,
+            )
     except Exception:
         pass  # Never crash the capture loop
 

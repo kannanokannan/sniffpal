@@ -18,6 +18,7 @@ Live: https://kannanokannan.github.io/sniffpal
 | `src/components/TopologyMap.jsx` | Clustered topology map with inferred gateway fallback and Wi-Fi band rings. |
 | `pi/server.py` | Raspberry Pi monitor server. Captures on schedule and serves the built web app. |
 | `scapy-capture-tool/` | Python capture tools for managed and monitor mode captures. |
+| `pi/deploy.sh` | One-command Pi installer that builds the app and installs a root-owned systemd service. |
 
 ## Architecture
 
@@ -69,6 +70,7 @@ Every structured finding must follow this shape:
 | `PRIV_SSDP_001` | Device advertising details over UPnP/SSDP | Shipped |
 | `INFO_NBNS_001` | Windows hostname exposed over NetBIOS | Shipped |
 | `IOT_TEL_001` | Cleartext MQTT or CoAP telemetry | Shipped |
+| `IOT_UPNP_002` | UPnP IGD AddPortMapping request | Shipped |
 
 ## Topology Notes
 
@@ -77,6 +79,7 @@ Every structured finding must follow this shape:
 - If a router-like device is present, it is used as the gateway.
 - If neither is present, SniffPal infers the subnet gateway as `.1` and marks it as inferred instead of incorrectly promoting the capture device or Pi.
 - Monitor mode captures can add Wi-Fi band rings for 2.4 GHz, 5 GHz, and 6 GHz.
+- ARP count-only floods are treated as noisy unless the same MAC claims more than one IP. This avoids flagging the Pi capture interface as MitM during normal local captures.
 
 ## Pi Mode
 
@@ -86,9 +89,12 @@ Useful local endpoints:
 
 - `GET /api/status`
 - `POST /api/capture/start`
+- `GET /api/capture/events`
 - `GET /api/digests/latest`
 - `GET /api/settings`
 - `POST /api/settings`
+
+`/api/status` includes live capture state plus optional `psutil` CPU, RAM, and network counters.
 
 ## Do Not
 

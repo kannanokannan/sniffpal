@@ -50,6 +50,7 @@ export default function App() {
     } catch { return { interval: 10, interface: 'wlan0' }; }
   });
   const piPollRef = useRef(null);
+  const piEventRef = useRef(null);
 
   // ── Load saved session on startup ─────────────────
   useEffect(() => {
@@ -62,7 +63,10 @@ export default function App() {
   useEffect(() => {
     if (!IS_PI_MODE) return;
     fetchPiStatus();
-    return () => { if (piPollRef.current) clearInterval(piPollRef.current); };
+    return () => {
+      if (piPollRef.current) clearInterval(piPollRef.current);
+      if (piEventRef.current) piEventRef.current.close();
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Trust device toggle ───────────────────────────
@@ -154,6 +158,7 @@ export default function App() {
       const res = await fetch('/api/status');
       const data = await res.json();
       setPiStatus(data);
+      setPiCapturing(Boolean(data.capture?.running));
     } catch { /* server may not be ready yet */ }
   }, []);
 
@@ -186,7 +191,23 @@ export default function App() {
       await fetch('/api/capture/start', { method: 'POST' });
       setPiCapturing(true);
       if (piPollRef.current) clearInterval(piPollRef.current);
-      piPollRef.current = setInterval(fetchPiStatus, 5000);
+      piPollRef.current = setInterval(fetchPiStatus, 3000);
+      if (piEventRef.current) piEventRef.current.close();
+      if (typeof EventSource !== 'undefined') {
+        piEventRef.current = new EventSource('/api/capture/events');
+        piEventRef.current.onmessage = event => {
+          try {
+            const capture = JSON.parse(event.data);
+            setPiStatus(prev => ({ ...(prev || {}), capture }));
+            setPiCapturing(Boolean(capture.running));
+            if (!capture.running && piEventRef.current) {
+              piEventRef.current.close();
+              piEventRef.current = null;
+              fetchPiStatus();
+            }
+          } catch { /* ignore malformed progress frames */ }
+        };
+      }
     } catch (e) {
       alert('Failed to start capture: ' + e.message);
     }
@@ -422,9 +443,11 @@ export default function App() {
                 <div className="bg-slate-800/60 backdrop-blur-md border
                 border-white/10 rounded-2xl p-5">
                   <div className="flex items-center gap-2 mb-4">
-                    <span className="w-2 h-2 rounded-full bg-green-400
-                    animate-pulse inline-block"/>
-                    <span className="text-green-400 text-sm font-medium">Live</span>
+                    <span className={`w-2 h-2 rounded-full inline-block
+                    ${piCapturing ? 'bg-cyan-400 animate-pulse' : 'bg-green-400'}`}/>
+                    <span className={`${piCapturing ? 'text-cyan-400' : 'text-green-400'} text-sm font-medium`}>
+                      {piCapturing ? 'Capturing' : 'Live'}
+                    </span>
                   </div>
                   <div className="grid grid-cols-2 gap-4 text-sm">
                     <div>
@@ -454,21 +477,53 @@ export default function App() {
                   </div>
                 </div>
 
+                {piStatus?.system && (
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="bg-slate-800/50 border border-white/10 rounded-2xl p-4">
+                      <p className="text-slate-500 text-xs mb-1">CPU</p>
+                      <p className="text-white font-semibold">{piStatus.system.cpuPercent}%</p>
+                    </div>
+                    <div className="bg-slate-800/50 border border-white/10 rounded-2xl p-4">
+                      <p className="text-slate-500 text-xs mb-1">RAM</p>
+                      <p className="text-white font-semibold">{piStatus.system.ramPercent}%</p>
+                    </div>
+                    <div className="bg-slate-800/50 border border-white/10 rounded-2xl p-4">
+                      <p className="text-slate-500 text-xs mb-1">Network</p>
+                      <p className="text-white font-semibold text-xs">
+                        {piStatus.system.netRecvMB} MB in
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 {/* Capture Progress */}
-                {piCapturing && (
+                {(piCapturing || piStatus?.capture?.lastMessage || piStatus?.capture?.error) && (
                   <div className="bg-blue-900/20 border border-blue-800/40
                   rounded-2xl p-4">
-                    <div className="flex items-center gap-3">
-                      <div className="w-4 h-4 border-2 border-cyan-400
-                      border-t-transparent rounded-full animate-spin
-                      flex-shrink-0"/>
+                    <div className="flex items-start gap-3">
+                      {piCapturing && (
+                        <div className="w-4 h-4 border-2 border-cyan-400
+                        border-t-transparent rounded-full animate-spin
+                        flex-shrink-0 mt-0.5"/>
+                      )}
                       <div>
-                        <p className="text-cyan-400 text-sm font-medium">
-                          Capture running…
+                        <p className={`${piStatus?.capture?.error ? 'text-red-400' : 'text-cyan-400'} text-sm font-medium`}>
+                          {piStatus?.capture?.error || piStatus?.capture?.lastMessage || 'Capture running...'}
                         </p>
                         <p className="text-slate-500 text-xs">
-                          Auto-capture every {piSettings.interval} minutes
+                          {(piStatus?.capture?.packets || 0).toLocaleString()} packets ·
+                          {' '}{(piStatus?.capture?.devices || 0).toLocaleString()} devices
                         </p>
+                        {piStatus?.capture?.protocols && Object.keys(piStatus.capture.protocols).length > 0 && (
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {Object.entries(piStatus.capture.protocols).map(([name, count]) => (
+                              <span key={name} className="text-[10px] bg-slate-900/70 border border-white/10
+                              text-slate-300 px-2 py-0.5 rounded-full">
+                                {name}: {count}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

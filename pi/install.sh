@@ -8,7 +8,7 @@ echo ""
 
 # Install Python dependencies
 echo "[1/4] Installing Python dependencies..."
-sudo pip3 install flask apscheduler --break-system-packages
+sudo pip3 install -r "$(dirname "$0")/requirements.txt" --break-system-packages
 
 # Install scapy if not already present
 echo "[2/4] Installing scapy..."
