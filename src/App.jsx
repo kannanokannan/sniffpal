@@ -16,6 +16,30 @@ import { Activity, AlertTriangle, Cpu, Clock } from 'lucide-react';
 
 const IS_PI_MODE = !window.location.hostname.includes('github.io')
   && window.location.hostname !== 'localhost';
+const DEFAULT_PI_SETTINGS = {
+  interval: 10,
+  interface: 'wlan0',
+  mode: 'standard',
+  monitorInterface: 'wlan1mon',
+  monitorPackets: 500,
+};
+
+function formatUptime(seconds) {
+  if (!seconds) return '0m';
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+function isPiDevice(device, piDevice) {
+  if (!device || !piDevice) return false;
+  if (piDevice.mac && device.mac?.toLowerCase() === piDevice.mac.toLowerCase()) return true;
+  if (piDevice.ip && device.ip === piDevice.ip) return true;
+  return false;
+}
 
 export default function App() {
   const [parsedData, setParsedData] = useState(null);
@@ -45,9 +69,11 @@ export default function App() {
   const [piSettingsOpen, setPiSettingsOpen] = useState(false);
   const [piSettings, setPiSettings] = useState(() => {
     try {
-      return JSON.parse(localStorage.getItem('sniffpal_pi_settings') || 'null')
-        || { interval: 10, interface: 'wlan0' };
-    } catch { return { interval: 10, interface: 'wlan0' }; }
+      return {
+        ...DEFAULT_PI_SETTINGS,
+        ...(JSON.parse(localStorage.getItem('sniffpal_pi_settings') || 'null') || {}),
+      };
+    } catch { return DEFAULT_PI_SETTINGS; }
   });
   const piPollRef = useRef(null);
   const piEventRef = useRef(null);
@@ -222,6 +248,9 @@ export default function App() {
         body: JSON.stringify({
           interval: piSettings.interval,
           interface: piSettings.interface,
+          mode: piSettings.mode,
+          monitorInterface: piSettings.monitorInterface,
+          monitorPackets: piSettings.monitorPackets,
         }),
       });
     } catch { /* saved locally regardless */ }
@@ -231,6 +260,11 @@ export default function App() {
   const criticalAlerts = parsedData?.security?.filter(
     a => a.severity === 'critical'
   ) || [];
+  const piDeviceInfo = IS_PI_MODE ? piStatus?.device : null;
+  const displayData = parsedData && piDeviceInfo
+    ? { ...parsedData, devices: parsedData.devices?.filter(d => !isPiDevice(d, piDeviceInfo)) || [] }
+    : parsedData;
+  const effectiveSelfIp = selfIp || piDeviceInfo?.ip || null;
 
   return (
     <>
@@ -471,14 +505,28 @@ export default function App() {
                     <div>
                       <p className="text-slate-500 text-xs">Interface</p>
                       <p className="text-white font-medium">
-                        {piStatus?.settings?.interface ?? piSettings.interface}
+                        {(piStatus?.settings?.mode ?? piSettings.mode) === 'monitor'
+                          ? (piStatus?.settings?.monitorInterface ?? piSettings.monitorInterface)
+                          : (piStatus?.settings?.interface ?? piSettings.interface)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500 text-xs">Mode</p>
+                      <p className="text-white font-medium capitalize">
+                        {piStatus?.settings?.mode ?? piSettings.mode ?? 'standard'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500 text-xs">This monitor</p>
+                      <p className="text-white font-medium text-xs truncate">
+                        {piStatus?.device?.ip || piStatus?.device?.hostname || 'Detecting'}
                       </p>
                     </div>
                   </div>
                 </div>
 
                 {piStatus?.system && (
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                     <div className="bg-slate-800/50 border border-white/10 rounded-2xl p-4">
                       <p className="text-slate-500 text-xs mb-1">CPU</p>
                       <p className="text-white font-semibold">{piStatus.system.cpuPercent}%</p>
@@ -490,8 +538,22 @@ export default function App() {
                     <div className="bg-slate-800/50 border border-white/10 rounded-2xl p-4">
                       <p className="text-slate-500 text-xs mb-1">Network</p>
                       <p className="text-white font-semibold text-xs">
-                        {piStatus.system.netRecvMB} MB in
+                        ↓ {piStatus.system.netRxKBps ?? 0} KB/s · ↑ {piStatus.system.netTxKBps ?? 0} KB/s
                       </p>
+                    </div>
+                    <div className="bg-slate-800/50 border border-white/10 rounded-2xl p-4">
+                      <p className="text-slate-500 text-xs mb-1">Temp</p>
+                      <p className="text-white font-semibold">
+                        {piStatus.system.tempC == null ? 'N/A' : `${piStatus.system.tempC}°C`}
+                      </p>
+                    </div>
+                    <div className="bg-slate-800/50 border border-white/10 rounded-2xl p-4">
+                      <p className="text-slate-500 text-xs mb-1">Uptime</p>
+                      <p className="text-white font-semibold">{formatUptime(piStatus.system.uptimeSeconds)}</p>
+                    </div>
+                    <div className="bg-slate-800/50 border border-white/10 rounded-2xl p-4">
+                      <p className="text-slate-500 text-xs mb-1">Pi time</p>
+                      <p className="text-white font-semibold">{piStatus.system.localTime || '--:--'}</p>
                     </div>
                   </div>
                 )}
@@ -571,6 +633,34 @@ export default function App() {
                   <div className="bg-slate-800/60 border border-white/10
                   rounded-2xl p-5 space-y-4">
                     <div>
+                      <label className="text-slate-400 text-xs block mb-2">
+                        Capture Mode
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        {[
+                          ['standard', 'Standard', 'Built-in Wi-Fi'],
+                          ['monitor', 'Monitor', 'USB adapter'],
+                        ].map(([mode, label, hint]) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() => setPiSettings(s => ({ ...s, mode }))}
+                            className={`text-left rounded-xl border px-3 py-2 transition-all
+                            ${piSettings.mode === mode
+                              ? 'bg-cyan-600/20 border-cyan-500/60 text-white'
+                              : 'bg-slate-700/60 border-white/10 text-slate-300 hover:border-white/20'
+                            }`}
+                          >
+                            <span className="block text-sm font-medium">{label}</span>
+                            <span className="block text-[10px] text-slate-500">{hint}</span>
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-slate-500 text-[11px] mt-2">
+                        Standard mode gives full traffic analysis. Monitor mode adds Wi-Fi band rings with a compatible adapter.
+                      </p>
+                    </div>
+                    <div>
                       <label className="text-slate-400 text-xs block mb-1">
                         Capture Interval
                       </label>
@@ -590,19 +680,39 @@ export default function App() {
                     </div>
                     <div>
                       <label className="text-slate-400 text-xs block mb-1">
-                        Network Interface
+                        {piSettings.mode === 'monitor' ? 'Monitor Interface' : 'Network Interface'}
                       </label>
                       <input
                         type="text"
-                        value={piSettings.interface}
+                        value={piSettings.mode === 'monitor' ? piSettings.monitorInterface : piSettings.interface}
                         onChange={e => setPiSettings(s =>
-                          ({ ...s, interface: e.target.value })
+                          piSettings.mode === 'monitor'
+                            ? ({ ...s, monitorInterface: e.target.value })
+                            : ({ ...s, interface: e.target.value })
                         )}
                         className="w-full bg-slate-700 border border-white/10
                         text-white text-sm rounded-lg px-3 py-2"
-                        placeholder="wlan0"
+                        placeholder={piSettings.mode === 'monitor' ? 'wlan1mon' : 'wlan0'}
                       />
                     </div>
+                    {piSettings.mode === 'monitor' && (
+                      <div>
+                        <label className="text-slate-400 text-xs block mb-1">
+                          Monitor Packet Count
+                        </label>
+                        <input
+                          type="number"
+                          min={50}
+                          step={50}
+                          value={piSettings.monitorPackets}
+                          onChange={e => setPiSettings(s =>
+                            ({ ...s, monitorPackets: Number(e.target.value) })
+                          )}
+                          className="w-full bg-slate-700 border border-white/10
+                          text-white text-sm rounded-lg px-3 py-2"
+                        />
+                      </div>
+                    )}
                     <button
                       onClick={handlePiSaveSettings}
                       className="w-full bg-cyan-600 hover:bg-cyan-500
@@ -676,7 +786,7 @@ export default function App() {
             )}
 
             {/* Summary Cards */}
-            <SummaryCards data={parsedData} />
+            <SummaryCards data={displayData} />
 
             {/* Critical Alerts Strip */}
             {criticalAlerts.length > 0 && (
@@ -712,7 +822,7 @@ export default function App() {
               <div className="lg:col-span-2">
                 <ProtocolChart
                   protocols={parsedData.protocols}
-                  devices={parsedData.devices}
+                  devices={displayData.devices}
                   trafficTypes={parsedData.trafficTypes}
                   onDataClick={setSelectedDataPoint}
                 />
@@ -726,7 +836,7 @@ export default function App() {
             {selectedDataPoint && (
               <DataPanel
                 data={selectedDataPoint}
-                devices={parsedData.devices}
+                devices={displayData.devices}
                 onClose={() => setSelectedDataPoint(null)}
               />
             )}
@@ -734,11 +844,11 @@ export default function App() {
             {/* Device Table */}
             <div ref={deviceTableRef}>
               <DeviceTable
-                devices={parsedData.devices}
+                devices={displayData.devices}
                 trustedDevices={trustedDevices}
                 onTrust={handleTrust}
                 onDeviceClick={setSelectedDataPoint}
-                selfIp={selfIp}
+                selfIp={effectiveSelfIp}
                 onSetSelf={handleSetSelf}
               />
             </div>
@@ -747,12 +857,16 @@ export default function App() {
             <WebsitesTab
               websites={parsedData.websites}
               trackers={parsedData.trackers}
-              selfIp={selfIp}
+              selfIp={effectiveSelfIp}
               onGoToDevices={scrollToDevices}
             />
 
             {/* Topology Map */}
-            <TopologyMap devices={parsedData.devices} />
+            <TopologyMap
+              devices={displayData.devices}
+              piDevice={piDeviceInfo}
+              captureMode={piStatus?.settings?.mode || piSettings.mode}
+            />
 
             {/* Security */}
             <SecurityTab
@@ -760,10 +874,10 @@ export default function App() {
               retransmissions={parsedData.retransmissions}
               avgRtt={parsedData.avgRtt}
               nxdomainCount={parsedData.nxdomainCount}
-              selfIp={selfIp}
+              selfIp={effectiveSelfIp}
               onGoToDevices={scrollToDevices}
               findings={parsedData.findings || []}
-              deviceCount={parsedData.devices?.length || 0}
+              deviceCount={displayData.devices?.length || 0}
             />
 
           </div>

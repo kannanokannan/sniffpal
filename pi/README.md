@@ -1,122 +1,82 @@
 # SniffPal Pi Server
 
-Run SniffPal as a whole-LAN monitor on a Raspberry Pi. Captures traffic every 30 minutes, keeps 24 hours of history (48 digests), and serves the full SniffPal dashboard locally.
+Run SniffPal as a local Raspberry Pi network monitor. The Pi captures traffic, stores recent digests, and serves the browser dashboard at `http://sniffpal.local:8080`.
 
----
-
-## Prerequisites
-
-- Raspberry Pi (any model with Wi-Fi) running Raspberry Pi OS / Debian
-- Python 3.9+
-- Node.js 18+ (for building the React app)
-
----
-
-## Installation
+## Quick Install
 
 ```bash
-cd pi
-chmod +x install.sh
-./install.sh
+cd ~/sniffpal
+bash pi/deploy.sh
 ```
 
-This will:
-1. Install Flask + APScheduler via pip
-2. Install scapy
-3. Build the React app into `../dist/`
-4. Create the `digests/` directory
+The deploy script installs Python dependencies, builds the React app, creates a root-owned `sniffpal` systemd service, and starts it.
 
----
+## Dashboard
 
-## How to Run
+Open:
+
+```text
+http://sniffpal.local:8080
+```
+
+The Pi Monitor screen shows:
+
+- capture status
+- stored digest count
+- selected capture mode
+- capture interface
+- packet/device/protocol progress during capture
+- CPU, RAM, temperature, uptime, Pi local time, and live network upload/download speed
+
+## Capture Modes
+
+### Standard Mode
+
+Default mode. Uses `scapy-capture-tool/capture.py`.
+
+- Works with the Pi built-in Wi-Fi interface, usually `wlan0`
+- Captures devices, traffic, websites, alerts, and topology
+- Does not include 2.4 / 5 / 6 GHz band metadata
+
+### Monitor Mode
+
+Uses `scapy-capture-tool/capture_monitor.py`.
+
+- Requires a compatible USB Wi-Fi adapter
+- Interface is usually something like `wlan1mon`
+- Adds Wi-Fi band metadata for topology rings
+- Does not replace Standard mode for full traffic analysis; it is best used for band/topology enrichment
+
+Enable monitor mode first:
 
 ```bash
-cd pi
-sudo python3 server.py
+sudo airmon-ng start wlan1
 ```
 
-The server starts on port 8080 and is accessible at:
-- `http://sniffpal.local:8080`
-- `http://<your-pi-ip>:8080`
-
----
-
-## How Scheduled Capture Works
-
-Once started, the server automatically captures network traffic for **30 minutes** every 30 minutes using `scapy-capture-tool/capture.py`.
-
-- Captures run on `wlan0` by default
-- Each capture is saved as a digest in `pi/digests/`
-- A maximum of **48 digests** (24 hours) are kept — oldest are deleted automatically
-- Raw capture files are deleted after the digest is saved
-
----
+Then choose `Monitor` in the Pi settings panel and set the interface to `wlan1mon`.
 
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/` | GET | Serves the SniffPal React dashboard |
-| `/api/status` | GET | Server status + digest count |
-| `/api/digests` | GET | List all stored digests (summary only) |
-| `/api/digests/latest` | GET | Full latest digest (for SniffPal parser) |
-| `/api/digests/<file>` | GET | Specific digest by filename |
-| `/api/capture/start` | POST | Trigger a manual capture immediately |
+| `/` | GET | Serves the SniffPal dashboard |
+| `/api/status` | GET | Server status, settings, capture state, Pi identity, and system metrics |
+| `/api/capture/start` | POST | Starts a manual capture |
+| `/api/capture/events` | GET | Live capture event stream |
+| `/api/digests` | GET | Lists stored digests |
+| `/api/digests/latest` | GET | Returns the latest digest |
+| `/api/settings` | GET/POST | Reads or saves capture settings |
 
----
-
-## How to Change Capture Interval
-
-Edit `server.py` and find this line:
-
-```python
-scheduler.add_job(run_capture, 'interval', minutes=30, id='scheduled_capture')
-```
-
-Change `minutes=30` to your preferred interval.
-
----
-
-## How to Change the Network Interface
-
-Edit `server.py` and find the `run_capture()` function:
-
-```python
-subprocess.run(
-    ['sudo', 'python3', capture_script,
-     '-i', 'wlan0', '-t', '1800', '-o', raw_path],
-```
-
-Change `'wlan0'` to your interface (e.g. `'eth0'`). Find your interface with:
+## Service Commands
 
 ```bash
-ip link show
+sudo systemctl status sniffpal
+sudo systemctl restart sniffpal
+sudo journalctl -u sniffpal -f
 ```
 
----
+## Notes
 
-## Run as a Service (Auto-start on Boot)
-
-Create `/etc/systemd/system/sniffpal.service`:
-
-```ini
-[Unit]
-Description=SniffPal Pi Server
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 /home/pi/sniffpal/pi/server.py
-WorkingDirectory=/home/pi/sniffpal/pi
-User=root
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then enable it:
-
-```bash
-sudo systemctl enable sniffpal
-sudo systemctl start sniffpal
-```
+- Packet capture requires root access.
+- Raw captures are temporary; saved digest JSON files live in `pi/digests/`.
+- Keep `pi/digests/` out of git.

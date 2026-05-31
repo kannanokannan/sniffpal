@@ -12,6 +12,7 @@ Prerequisites:
 import argparse
 import json
 import time
+from collections import Counter
 from datetime import datetime
 
 try:
@@ -21,6 +22,8 @@ except ImportError:
     exit(1)
 
 sniffpal_buffer = []
+seen_devices = set()
+protocol_counts = Counter()
 
 def get_band(freq):
     if not freq:
@@ -34,6 +37,7 @@ def get_band(freq):
     return "Unknown"
 
 def process_packet(packet):
+    global seen_devices, protocol_counts
     if not (packet.haslayer(RadioTap) and packet.haslayer(Dot11)):
         return
     try:
@@ -44,6 +48,9 @@ def process_packet(packet):
 
         if not src_mac or not dst_mac:
             return
+        seen_devices.add(src_mac)
+        seen_devices.add(dst_mac)
+        protocol_counts["802.11"] += 1
 
         packet_data = {
             "_source": {
@@ -68,6 +75,15 @@ def process_packet(packet):
             }
         }
         sniffpal_buffer.append(packet_data)
+        if len(sniffpal_buffer) % 50 == 0:
+            print(
+                "SNIFFPAL_PROGRESS " + json.dumps({
+                    "packets": len(sniffpal_buffer),
+                    "devices": len(seen_devices),
+                    "protocols": dict(protocol_counts),
+                }),
+                flush=True,
+            )
         print(f"  {src_mac} → {dst_mac} | {band} ({freq} MHz)")
 
     except (AttributeError, TypeError):

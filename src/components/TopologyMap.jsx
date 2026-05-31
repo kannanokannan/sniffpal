@@ -141,7 +141,7 @@ function nodeGlyph(device) {
   return 'D';
 }
 
-export default function TopologyMap({ devices }) {
+export default function TopologyMap({ devices, captureMode = 'standard' }) {
   const [selected, setSelected] = useState(null);
 
   if (!devices || devices.length === 0) return null;
@@ -225,9 +225,10 @@ export default function TopologyMap({ devices }) {
       </div>
 
       {!hasBandData && (
-        <div className="bg-slate-700/40 border border-slate-600/50 rounded-xl px-4 py-2 mb-4 text-xs text-slate-400">
-          Band data unavailable. Use <span className="font-mono text-slate-300">capture_monitor.py</span> for
-          2.4 / 5 / 6 GHz detection. Devices are shown with neutral rings.
+        <div className="bg-slate-900/40 border border-slate-700/50 rounded-xl px-4 py-2 mb-4 text-xs text-slate-500">
+          {captureMode === 'monitor'
+            ? 'Monitor mode is selected, but this capture did not include band metadata yet. Check the monitor-mode adapter and interface.'
+            : 'Standard capture: Wi-Fi band rings require Monitor mode with a compatible USB adapter.'}
         </div>
       )}
 

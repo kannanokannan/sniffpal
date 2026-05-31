@@ -13,7 +13,7 @@ Access:
 """
 
 from flask import Flask, jsonify, send_from_directory, request, Response
-import os, json, glob, subprocess, threading, sys, time
+import os, json, glob, subprocess, threading, sys, time, socket
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -43,7 +43,12 @@ capture_state = {
 DEFAULT_SETTINGS = {
     'interval':  10,     # minutes
     'interface': 'wlan0',
+    'mode': 'standard',
+    'monitorInterface': 'wlan1mon',
+    'monitorPackets': 500,
 }
+
+_last_net_sample = None
 
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
@@ -137,6 +142,12 @@ def update_settings():
         settings['interval'] = int(data['interval'])
     if 'interface' in data:
         settings['interface'] = str(data['interface'])
+    if 'mode' in data:
+        settings['mode'] = 'monitor' if str(data['mode']) == 'monitor' else 'standard'
+    if 'monitorInterface' in data:
+        settings['monitorInterface'] = str(data['monitorInterface'])
+    if 'monitorPackets' in data:
+        settings['monitorPackets'] = max(50, int(data['monitorPackets']))
     with open(SETTINGS_FILE, 'w') as f:
         json.dump(settings, f)
     # Reschedule the capture job with new interval
@@ -186,14 +197,24 @@ def status():
         'settings':   settings,
         'capture':    capture,
         'system':     get_system_metrics(),
+        'device':     get_device_info(settings),
     })
 
 def get_system_metrics():
+    global _last_net_sample
     if psutil is None:
         return None
     try:
         net = psutil.net_io_counters()
         mem = psutil.virtual_memory()
+        now = time.time()
+        rx_rate = 0
+        tx_rate = 0
+        if _last_net_sample:
+            elapsed = max(now - _last_net_sample['time'], 0.001)
+            rx_rate = max(0, (net.bytes_recv - _last_net_sample['recv']) / elapsed / 1024)
+            tx_rate = max(0, (net.bytes_sent - _last_net_sample['sent']) / elapsed / 1024)
+        _last_net_sample = {'time': now, 'recv': net.bytes_recv, 'sent': net.bytes_sent}
         return {
             'cpuPercent': psutil.cpu_percent(interval=None),
             'ramPercent': mem.percent,
@@ -201,9 +222,41 @@ def get_system_metrics():
             'ramTotalMB': round(mem.total / 1024 / 1024),
             'netSentMB': round(net.bytes_sent / 1024 / 1024, 1),
             'netRecvMB': round(net.bytes_recv / 1024 / 1024, 1),
+            'netRxKBps': round(rx_rate, 1),
+            'netTxKBps': round(tx_rate, 1),
+            'tempC': read_temperature(),
+            'uptimeSeconds': int(now - psutil.boot_time()),
+            'localTime': datetime.now().strftime('%H:%M:%S'),
         }
     except Exception:
         return None
+
+def read_temperature():
+    try:
+        with open('/sys/class/thermal/thermal_zone0/temp') as f:
+            return round(int(f.read().strip()) / 1000, 1)
+    except Exception:
+        return None
+
+def get_device_info(settings):
+    info = {
+        'hostname': socket.gethostname(),
+        'interface': settings.get('interface', 'wlan0'),
+        'ip': None,
+        'mac': None,
+    }
+    if psutil is None:
+        return info
+    try:
+        for addr in psutil.net_if_addrs().get(info['interface'], []):
+            family = str(addr.family)
+            if family.endswith('AF_INET') and not info['ip']:
+                info['ip'] = addr.address
+            if family.endswith('AF_PACKET') or family.endswith('AF_LINK'):
+                info['mac'] = addr.address.lower()
+    except Exception:
+        pass
+    return info
 
 # ── Capture + digest ─────────────────────────────────────────────────────────
 
@@ -226,20 +279,28 @@ def run_capture():
         })
 
     settings = load_settings()
-    iface    = settings['interface']
+    mode     = settings.get('mode', 'standard')
+    iface    = settings.get('monitorInterface', 'wlan1mon') if mode == 'monitor' else settings['interface']
     interval = settings['interval']
     duration = interval * 60  # capture for full interval in seconds
 
     ts       = datetime.now().strftime('%Y%m%d-%H%M%S')
     raw_path = tempfile.mktemp(suffix='.json')
-    capture_script = os.path.join(
-        os.path.dirname(__file__), '..', 'scapy-capture-tool', 'capture.py'
-    )
+    script_name = 'capture_monitor.py' if mode == 'monitor' else 'capture.py'
+    capture_script = os.path.join(os.path.dirname(__file__), '..', 'scapy-capture-tool', script_name)
 
-    print(f'[SniffPal Pi] Starting capture on {iface} for {duration}s at {ts}...', flush=True)
+    print(f'[SniffPal Pi] Starting {mode} capture on {iface} at {ts}...', flush=True)
 
     try:
-        capture_cmd = ['python3', capture_script, '-i', iface, '-t', str(duration), '-o', raw_path]
+        if mode == 'monitor':
+            capture_cmd = [
+                'python3', capture_script,
+                '-i', iface,
+                '-c', str(settings.get('monitorPackets', 500)),
+                '-o', raw_path,
+            ]
+        else:
+            capture_cmd = ['python3', capture_script, '-i', iface, '-t', str(duration), '-o', raw_path]
         if hasattr(os, 'geteuid') and os.geteuid() != 0:
             capture_cmd = ['sudo', *capture_cmd]
 
@@ -293,6 +354,8 @@ def run_capture():
         digest = {
             'timestamp':   ts,
             'capturedAt':  datetime.now().isoformat(),
+            'captureMode': mode,
+            'interface':   iface,
             'packetCount': len(raw),
             'packets':     raw,  # full packets — SniffPal parser runs client-side
         }
@@ -347,6 +410,7 @@ scheduler.add_job(run_capture, 'interval', minutes=_startup_interval, id='captur
 scheduler.start()
 
 print(f'[SniffPal Pi] Scheduler started — capturing every {_startup_interval} minutes', flush=True)
+print(f'[SniffPal Pi] Mode: {_startup_settings.get("mode", "standard")}', flush=True)
 print(f'[SniffPal Pi] Interface: {_startup_settings["interface"]}', flush=True)
 print('[SniffPal Pi] Access the dashboard at http://sniffpal.local:8080', flush=True)
 

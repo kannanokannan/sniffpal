@@ -94,7 +94,12 @@ Useful local endpoints:
 - `GET /api/settings`
 - `POST /api/settings`
 
-`/api/status` includes live capture state plus optional `psutil` CPU, RAM, and network counters.
+`/api/status` includes live capture state, Pi identity, capture mode, temperature, uptime, local time, and optional `psutil` CPU/RAM/network counters.
+
+Capture modes:
+
+- `standard` runs `scapy-capture-tool/capture.py` against the normal interface, usually `wlan0`.
+- `monitor` runs `scapy-capture-tool/capture_monitor.py` against the monitor interface, usually `wlan1mon`, and is only for compatible USB Wi-Fi adapters.
 
 ## Do Not
 
