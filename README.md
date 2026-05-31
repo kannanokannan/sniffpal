@@ -41,6 +41,8 @@ cd pi && sudo python3 server.py
 
 Open `http://sniffpal.local:8080`. SniffPal captures automatically every 10 minutes by default.
 
+Packet capture needs raw network access on Linux, so start the Pi server with `sudo` or install it as a root-owned service.
+
 ### Pi Features
 
 - Auto-capture on a schedule: 5 / 10 / 30 / 60 minutes

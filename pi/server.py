@@ -164,9 +164,12 @@ def run_capture():
     print(f'[SniffPal Pi] Starting capture on {iface} for {duration}s at {ts}...', flush=True)
 
     try:
+        capture_cmd = ['python3', capture_script, '-i', iface, '-t', str(duration), '-o', raw_path]
+        if hasattr(os, 'geteuid') and os.geteuid() != 0:
+            capture_cmd = ['sudo', *capture_cmd]
+
         subprocess.run(
-            ['sudo', 'python3', capture_script,
-             '-i', iface, '-t', str(duration), '-o', raw_path],
+            capture_cmd,
             check=True,
             timeout=duration + 60,
         )
