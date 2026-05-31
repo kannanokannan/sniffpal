@@ -62,6 +62,8 @@ def index():
 
 @app.route('/<path:path>')
 def static_files(path):
+    if path.startswith('sniffpal/'):
+        path = path[len('sniffpal/'):]
     try:
         return send_from_directory(app.static_folder, path)
     except Exception:
