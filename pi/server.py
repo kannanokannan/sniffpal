@@ -60,6 +60,13 @@ def load_settings():
 def index():
     return send_from_directory(app.static_folder, 'index.html')
 
+@app.route('/sniffpal/<path:path>')
+def github_pages_assets(path):
+    try:
+        return send_from_directory(app.static_folder, path)
+    except Exception:
+        return send_from_directory(app.static_folder, 'index.html')
+
 @app.route('/<path:path>')
 def static_files(path):
     if path.startswith('sniffpal/'):
