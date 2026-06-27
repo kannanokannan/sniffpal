@@ -31,6 +31,8 @@ SniffPal is a local-first network intelligence tool. Drop in a packet capture an
 
 SniffPal can also run as a self-contained Raspberry Pi network monitor.
 
+The web and Pi experiences share one React codebase. Public sites such as `context-stack.org/sniffpal` and GitHub Pages show the PC file-upload version. Pi mode only activates on local Pi/LAN hosts such as `sniffpal.local`, private LAN IPs, or port `8080` loopback.
+
 ### Quick Start
 
 ```bash

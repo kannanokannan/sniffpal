@@ -14,8 +14,19 @@ import { saveSession, loadSession, clearSession, timeAgo } from './utils/useSess
 import { calculateHealthScore } from './core/healthScore';
 import { Activity, AlertTriangle, Cpu, Clock } from 'lucide-react';
 
-const IS_PI_MODE = !window.location.hostname.includes('github.io')
-  && window.location.hostname !== 'localhost';
+function isPrivateLanHost(hostname) {
+  return /^(10|192\.168|172\.(1[6-9]|2\d|3[0-1]))\./.test(hostname);
+}
+
+function isPiHost(hostname, port) {
+  const host = hostname.toLowerCase();
+  return host === 'sniffpal.local' ||
+    host.endsWith('.local') ||
+    ((host === 'localhost' || host === '127.0.0.1' || host === '::1') && port === '8080') ||
+    isPrivateLanHost(host);
+}
+
+const IS_PI_MODE = isPiHost(window.location.hostname, window.location.port);
 const DEFAULT_PI_SETTINGS = {
   interval: 10,
   interface: 'wlan0',

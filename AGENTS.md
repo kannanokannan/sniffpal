@@ -85,6 +85,8 @@ Every structured finding must follow this shape:
 
 Pi mode is served by `pi/server.py`. The Pi captures locally and the browser still performs the analysis. Keep raw captures and digest files out of git.
 
+The project is one shared React codebase with runtime mode detection. Public hosts must show the PC upload experience. Pi mode should only activate on `sniffpal.local`, `.local` LAN names, private LAN IPs, or loopback on port `8080`.
+
 Useful local endpoints:
 
 - `GET /api/status`
