@@ -98,8 +98,158 @@ async function streamParsePackets(file, onProgress) {
   return { packets, totalPacketCount };
 }
 
+function appendBytes(a, b) {
+  if (!a || a.length === 0) return b;
+  if (!b || b.length === 0) return a;
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+function samplePacket(packets, totalPacketCount, layers) {
+  if (packets.length < MAX_PACKETS) {
+    packets.push({ _source: { layers } });
+    return;
+  }
+
+  const j = Math.floor(Math.random() * totalPacketCount);
+  if (j < MAX_PACKETS) packets[j] = { _source: { layers } };
+}
+
+async function parseGzipBinary(file, onProgress) {
+  const bytes = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+  if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) return null;
+
+  if (!('DecompressionStream' in self)) {
+    throw new Error('This browser cannot open gzip captures. Decompress the .pcap.gz file first, then upload the .pcap file.');
+  }
+
+  onProgress(4, 'Decompressing gzip capture...');
+
+  const reader = file.stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+  const packets = [];
+  let totalPacketCount = 0;
+  let carry = new Uint8Array(0);
+  let mode = null;
+
+  let pcapRd32 = null;
+  let pcapNetwork = 1;
+  let pcapNano = false;
+
+  let pcapngLe = true;
+  let pcapngInterfaces = [];
+  let pcapngGotSHB = false;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (!value?.length) continue;
+
+    carry = appendBytes(carry, value);
+
+    if (!mode) {
+      if (carry.length < 24) continue;
+      const magic = readU32LE(carry, 0);
+      if (magic === 0x0a0d0d0a) {
+        mode = 'pcapng';
+      } else {
+        let le;
+        if      (magic === 0xa1b2c3d4) le = true;
+        else if (magic === 0xd4c3b2a1) le = false;
+        else if (magic === 0xa1b23c4d) { le = true;  pcapNano = true; }
+        else if (magic === 0x4d3cb2a1) { le = false; pcapNano = true; }
+        else throw new Error('The gzip file opened, but the content is not a supported pcap or pcapng capture.');
+
+        mode = 'pcap';
+        pcapRd32 = le ? readU32LE : readU32BE;
+        pcapNetwork = pcapRd32(carry, 20);
+        carry = carry.slice(24);
+      }
+    }
+
+    if (mode === 'pcap') {
+      let pos = 0;
+      while (pos + 16 <= carry.length) {
+        const tsSec  = pcapRd32(carry, pos);
+        const tsFrac = pcapRd32(carry, pos + 4);
+        const incLen = pcapRd32(carry, pos + 8);
+        const oriLen = pcapRd32(carry, pos + 12);
+
+        if (incLen > 65536) throw new Error('The gzip capture contains a damaged pcap record.');
+        if (pos + 16 + incLen > carry.length) break;
+
+        const timeEpoch = pcapNano ? tsSec + tsFrac / 1e9 : tsSec + tsFrac / 1e6;
+        const pktData = carry.subarray(pos + 16, pos + 16 + incLen);
+        const layers = buildLayers(pktData, pcapNetwork, timeEpoch, oriLen);
+
+        totalPacketCount++;
+        samplePacket(packets, totalPacketCount, layers);
+        pos += 16 + incLen;
+      }
+      carry = carry.slice(pos);
+    } else if (mode === 'pcapng') {
+      let pos = 0;
+      while (pos + 8 <= carry.length) {
+        const blockTypeLE = readU32LE(carry, pos);
+
+        if (!pcapngGotSHB) {
+          if (blockTypeLE !== 0x0a0d0d0a) break;
+          if (pos + 12 > carry.length) break;
+          const shbLen = readU32LE(carry, pos + 4);
+          if (pos + shbLen > carry.length) break;
+          const boMagic = readU32LE(carry, pos + 8);
+          pcapngLe = (boMagic === 0x1a2b3c4d);
+          pcapngGotSHB = true;
+          pos += shbLen;
+          continue;
+        }
+
+        const rd32 = pcapngLe ? readU32LE : readU32BE;
+        const rd16 = pcapngLe ? readU16LE : readU16BE;
+        const bType = rd32(carry, pos);
+        const bLen  = rd32(carry, pos + 4);
+
+        if (bLen < 12 || bLen > 16 * 1024 * 1024) throw new Error('The gzip capture contains a damaged pcapng block.');
+        if (pos + bLen > carry.length) break;
+
+        if (bType === 0x00000001) {
+          pcapngInterfaces.push({ linkType: rd16(carry, pos + 8), tsResol: 1000000 });
+        } else if (bType === 0x00000006) {
+          const ifaceId = rd32(carry, pos + 8);
+          const tsHigh  = rd32(carry, pos + 12);
+          const tsLow   = rd32(carry, pos + 16);
+          const captLen = rd32(carry, pos + 20);
+          const origLen = rd32(carry, pos + 24);
+
+          if (captLen <= 65536 && pos + 28 + captLen <= carry.length) {
+            const iface = pcapngInterfaces[ifaceId] || { linkType: 1, tsResol: 1000000 };
+            const timeEpoch = (tsHigh * 4294967296 + tsLow) / iface.tsResol;
+            const pktData = carry.subarray(pos + 28, pos + 28 + captLen);
+            const layers = buildLayers(pktData, iface.linkType, timeEpoch, origLen);
+
+            totalPacketCount++;
+            samplePacket(packets, totalPacketCount, layers);
+          }
+        }
+
+        pos += bLen;
+      }
+      carry = carry.slice(pos);
+    }
+
+    if (totalPacketCount % 500 === 0) {
+      onProgress(8, `Decompressing and parsing... ${totalPacketCount.toLocaleString()} packets`);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+
+  onProgress(90, `Analysing ${packets.length.toLocaleString()} sampled packets...`);
+  return { packets, totalPacketCount };
+}
+
 self.onmessage = async function (e) {
-  const { file, fileSize } = e.data;
+  let { file, fileSize } = e.data;
 
   try {
     // ── Step 1: Stream-parse the file ──────────────
@@ -108,6 +258,7 @@ self.onmessage = async function (e) {
     // Detect format by magic bytes
     const magicBuf = new Uint8Array(await file.slice(0, 4).arrayBuffer());
     const magic32 = readU32LE(magicBuf, 0);
+    const isGzip = magicBuf[0] === 0x1f && magicBuf[1] === 0x8b;
     const isBinary =
       magic32 === 0xa1b2c3d4 || magic32 === 0xd4c3b2a1 ||
       magic32 === 0xa1b23c4d || magic32 === 0x4d3cb2a1 ||
@@ -115,7 +266,7 @@ self.onmessage = async function (e) {
 
     let totalPacketCount, packets;
     try {
-      ({ totalPacketCount, packets } = await (isBinary ? parsePcapBinary : streamParsePackets)(
+      ({ totalPacketCount, packets } = await (isGzip ? parseGzipBinary : isBinary ? parsePcapBinary : streamParsePackets)(
         file,
         (pct, label) => self.postMessage({ type: "progress", value: pct, label })
       ));

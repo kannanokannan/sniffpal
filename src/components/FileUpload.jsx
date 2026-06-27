@@ -6,13 +6,40 @@ export default function FileUpload({ onFile }) {
   const [error, setError] = useState('');
   const [showHelp, setShowHelp] = useState(false);
 
-  const processFile = (file) => {
+  const isSupportedCapture = async (file) => {
+    const name = file.name.toLowerCase();
+    if (
+      name.endsWith('.json') ||
+      name.endsWith('.pcap') ||
+      name.endsWith('.pcapng') ||
+      name.endsWith('.pcap.gz') ||
+      name.endsWith('.pcapng.gz') ||
+      name.endsWith('.gz')
+    ) {
+      return true;
+    }
+
+    const bytes = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+    const magic =
+      (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+    const isPcap =
+      magic === 0xa1b2c3d4 || magic === 0xd4c3b2a1 ||
+      magic === 0xa1b23c4d || magic === 0x4d3cb2a1 ||
+      magic === 0x0a0d0d0a;
+    const isGzip = bytes[0] === 0x1f && bytes[1] === 0x8b;
+    const firstText = new TextDecoder()
+      .decode(bytes)
+      .trimStart()
+      .charAt(0);
+
+    return isPcap || isGzip || firstText === '{' || firstText === '[';
+  };
+
+  const processFile = async (file) => {
     setError('');
-    const ok = file.name.endsWith('.json') ||
-               file.name.endsWith('.pcap') ||
-               file.name.endsWith('.pcapng');
+    const ok = await isSupportedCapture(file);
     if (!ok) {
-      setError('Please upload a .json, .pcap, or .pcapng file');
+      setError('Please upload a .json, .pcap, .pcapng, or .pcap.gz file');
       return;
     }
     onFile(file);
@@ -54,7 +81,7 @@ export default function FileUpload({ onFile }) {
           Drop your capture file here
         </h3>
         <p className="text-slate-400 text-sm mb-3">
-          Supports .pcap, .pcapng (native) and Wireshark/tshark JSON exports
+          Supports .pcap, .pcapng, .pcap.gz and Wireshark/tshark JSON exports
         </p>
 
         {/* File size info */}
@@ -84,7 +111,7 @@ export default function FileUpload({ onFile }) {
           Browse Files
           <input
             type="file"
-            accept=".json,.pcap,.pcapng"
+            accept=".json,.pcap,.pcapng,.gz,.pcap.gz,.pcapng.gz"
             className="hidden"
             onChange={(e) => e.target.files?.length &&
               processFile(e.target.files[0])}
