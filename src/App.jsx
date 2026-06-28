@@ -889,6 +889,7 @@ export default function App() {
               onGoToDevices={scrollToDevices}
               findings={parsedData.findings || []}
               deviceCount={displayData.devices?.length || 0}
+              guestWifi={parsedData.guestWifi}
             />
 
           </div>

@@ -302,6 +302,7 @@ self.onmessage = async function (e) {
     let nxdomainCount = 0;
     let icmpRedirects = 0;
     const rttValues = [];
+    const guestWifi = createGuestWifiTracker();
 
     // ── mDNS / SSDP enrichment map ─────────────────
     // mac → { deviceName, deviceType, osHint, manufacturer, model, services, enrichmentSource }
@@ -340,6 +341,9 @@ self.onmessage = async function (e) {
       const srcIp   = layers?.ip?.["ip.src"]   || layers?.ipv6?.["ipv6.src"] || null;
       const dstIp   = layers?.ip?.["ip.dst"]   || layers?.ipv6?.["ipv6.dst"] || null;
       const hostname = layers?.bootp?.["bootp.option.hostname"] || layers?.dhcp?.["dhcp.option.hostname"] || null;
+      if (layers?.sniffpal?.["sniffpal.captive_vendor"]) {
+        recordCaptiveVendor(guestWifi, layers.sniffpal["sniffpal.captive_vendor"], 'certificate or portal payload');
+      }
 
       // ── DNS ────────────────────────────────────────
       if (layers?.dns) {
@@ -358,6 +362,7 @@ self.onmessage = async function (e) {
           }
           dnsQueries[domain].count++;
           if (srcIp) dnsQueries[domain].srcIps.add(srcIp);
+          recordGuestDomain(guestWifi, domain, 'DNS');
           if (isResponse === "1" && rcode === "3") {
             dnsQueries[domain].failed++;
             nxdomainCount++;
@@ -381,6 +386,7 @@ self.onmessage = async function (e) {
         }
         sniSites[domain].count++;
         if (srcIp) sniSites[domain].srcIps.add(srcIp);
+        recordGuestDomain(guestWifi, domain, 'TLS SNI');
       }
 
       // ── Tracker Detection ──────────────────────────
@@ -404,7 +410,9 @@ self.onmessage = async function (e) {
         const host = layers.http?.["http.host"];
         const method = layers.http?.["http.request.method"];
         const authHeader = layers.http?.["http.authorization"];
+        const cookieHeader = layers.http?.["http.cookie"];
         const uri = layers.http?.["http.request.uri"];
+        const httpText = layers.http?.["http.file_data"] || '';
 
         if (host) {
           const domain = cleanDomain(host);
@@ -419,6 +427,8 @@ self.onmessage = async function (e) {
           sniSites[domain].count++;
           if (srcIp) sniSites[domain].srcIps.add(srcIp);
         }
+
+        recordGuestHttp(guestWifi, { host, method, uri, authHeader, cookieHeader, text: httpText });
 
         if (authHeader) {
           securityAlerts.push({
@@ -525,6 +535,7 @@ self.onmessage = async function (e) {
       // ── Traffic Type ───────────────────────────────
       const srcPort = parseInt(layers?.tcp?.["tcp.srcport"] || layers?.udp?.["udp.srcport"] || 0);
       const dstPort = parseInt(layers?.tcp?.["tcp.dstport"] || layers?.udp?.["udp.dstport"] || 0);
+      recordGuestDiscovery(guestWifi, srcPort, dstPort, layers);
       const trafficType = detectTrafficType(layers, srcPort, dstPort, frameLen);
       if (trafficType) {
         trafficTypes[trafficType] = (trafficTypes[trafficType] || 0) + 1;
@@ -831,6 +842,8 @@ self.onmessage = async function (e) {
       .sort((a, b) => b.count - a.count)
       .slice(0, 50);
 
+    const guestWifiReport = buildGuestWifiReport(guestWifi, websiteList);
+
     self.postMessage({ type: "progress", value: 100, label: "Done!" });
 
     self.postMessage({
@@ -857,6 +870,7 @@ self.onmessage = async function (e) {
         captureStart: captureStart ? new Date(captureStart * 1000).toISOString() : null,
         captureEnd:   captureEnd   ? new Date(captureEnd   * 1000).toISOString() : null,
         findings,
+        guestWifi: guestWifiReport,
       }
     });
 
@@ -1128,6 +1142,7 @@ function addTransportLayer(data, off, proto, layers) {
     const sp = (data[off]<<8)|data[off+1];
     const dp = (data[off+2]<<8)|data[off+3];
     layers.tcp = { 'tcp.srcport': String(sp), 'tcp.dstport': String(dp) };
+    addTcpPayloadHints(data, off, layers);
     if (sp===443||dp===443||sp===8443||dp===8443) layers.tls = {};
     if (sp===80||dp===80) addHttpLayer(data, off, layers);
 
@@ -1163,11 +1178,39 @@ function addHttpLayer(data, tcpOff, layers) {
   }
   if (!text) return;
   const firstLine = text.split(/\r?\n/, 1)[0] || '';
-  const method = firstLine.split(/\s+/, 1)[0];
+  const parts = firstLine.split(/\s+/);
+  const method = parts[0];
   if (method) layers.http['http.request.method'] = method;
+  if (parts[1]) layers.http['http.request.uri'] = parts[1];
   const host = text.match(/\nhost:\s*([^\r\n]+)/i);
   if (host) layers.http['http.host'] = host[1].trim();
+  const auth = text.match(/\nauthorization:\s*([^\r\n]+)/i);
+  if (auth) layers.http['http.authorization'] = auth[1].trim();
+  const cookie = text.match(/\ncookie:\s*([^\r\n]+)/i);
+  if (cookie) layers.http['http.cookie'] = cookie[1].trim();
   layers.http['http.file_data'] = text.slice(0, 2048);
+}
+
+function addTcpPayloadHints(data, tcpOff, layers) {
+  const dataOffset = ((data[tcpOff + 12] >> 4) & 0x0f) * 4;
+  const payloadOff = tcpOff + dataOffset;
+  if (payloadOff >= data.length) return;
+  const payloadLen = Math.min(data.length - payloadOff, 1536);
+  let text = '';
+  for (let i = 0; i < payloadLen; i++) {
+    const b = data[payloadOff + i];
+    if (b >= 32 && b <= 126) text += String.fromCharCode(b);
+    else if (b === 10 || b === 13 || b === 9) text += '\n';
+  }
+  if (!text) return;
+
+  const lower = text.toLowerCase();
+  const vendors = ['24online', 'sify', 'sophos', 'mikrotik', 'fortinet', 'aruba', 'ruckus', 'captive portal'];
+  const matched = vendors.find(v => lower.includes(v));
+  if (!matched) return;
+
+  layers.sniffpal = layers.sniffpal || {};
+  layers.sniffpal['sniffpal.captive_vendor'] = matched;
 }
 
 function addDnsLayer(data, off, layers) {
@@ -1582,6 +1625,189 @@ function detectIgdPortMapping(layers, dstIp) {
   const text = flattenLayerValues(layers).toLowerCase();
   return text.includes('addportmapping') ||
     (text.includes('wanipconnection') && text.includes('soap'));
+}
+
+function createGuestWifiTracker() {
+  return {
+    captiveVendors: new Map(),
+    wpadCount: 0,
+    visibleDomains: new Map(),
+    http: {
+      total: 0,
+      post: 0,
+      cookies: 0,
+      auth: 0,
+      piiHints: 0,
+      lowRisk: 0,
+      hosts: new Map(),
+      riskySamples: [],
+      lowRiskSamples: [],
+    },
+    discovery: {
+      ssdp: 0,
+      mdns: 0,
+      llmnr: 0,
+      netbios: 0,
+      upnp: 0,
+    },
+  };
+}
+
+function bumpMap(map, key, amount = 1) {
+  if (!key) return;
+  map.set(key, (map.get(key) || 0) + amount);
+}
+
+function recordCaptiveVendor(report, vendor, source) {
+  if (!vendor) return;
+  const label = vendor.toLowerCase() === '24online' ? '24online' : vendor;
+  const current = report.captiveVendors.get(label) || { vendor: label, count: 0, sources: new Set() };
+  current.count++;
+  current.sources.add(source);
+  report.captiveVendors.set(label, current);
+}
+
+function recordGuestDomain(report, domain, source) {
+  if (!domain) return;
+  const d = cleanDomain(domain);
+  bumpMap(report.visibleDomains, d);
+
+  if (d === 'wpad' || d.startsWith('wpad.') || d.includes('.wpad.')) report.wpadCount++;
+
+  const captiveHints = [
+    ['24online', '24online'],
+    ['sify', 'Sify'],
+    ['sophos', 'Sophos'],
+    ['mikrotik', 'MikroTik'],
+    ['fortinet', 'Fortinet'],
+    ['aruba', 'Aruba'],
+    ['ruckus', 'Ruckus'],
+    ['captive', 'Captive Portal'],
+  ];
+  const match = captiveHints.find(([needle]) => d.includes(needle));
+  if (match) recordCaptiveVendor(report, match[1], source);
+}
+
+function looksLowRiskHttp(host, uri) {
+  const text = `${host || ''} ${uri || ''}`.toLowerCase();
+  return text.includes('crl') ||
+    text.includes('ocsp') ||
+    text.includes('delivery.mp.microsoft.com') ||
+    text.includes('msedge.b.tlu') ||
+    text.includes('chrome-variations') ||
+    text.includes('clientservices.googleapis.com') ||
+    text.includes('update.microsoft.com');
+}
+
+function recordGuestHttp(report, { host, method, uri, authHeader, cookieHeader, text }) {
+  if (!host && !method && !text) return;
+  const domain = host ? cleanDomain(host) : 'unknown';
+  const upperMethod = (method || '').toUpperCase();
+  const body = `${uri || ''}\n${text || ''}`;
+  const hasPiiHint = /(password|passwd|pwd|otp|token|session|mobile|phone|email|guest|register|login|room|name=|username|user=)/i.test(body);
+  const lowRisk = looksLowRiskHttp(domain, uri);
+
+  report.http.total++;
+  bumpMap(report.http.hosts, domain);
+  if (upperMethod === 'POST') report.http.post++;
+  if (cookieHeader) report.http.cookies++;
+  if (authHeader) report.http.auth++;
+  if (hasPiiHint) report.http.piiHints++;
+  if (lowRisk) report.http.lowRisk++;
+
+  const sample = {
+    host: domain,
+    method: upperMethod || 'HTTP',
+    uri: (uri || '').slice(0, 120),
+  };
+  const risky = upperMethod === 'POST' || cookieHeader || authHeader || hasPiiHint;
+  if (risky && report.http.riskySamples.length < 8) report.http.riskySamples.push(sample);
+  if (!risky && lowRisk && report.http.lowRiskSamples.length < 8) report.http.lowRiskSamples.push(sample);
+}
+
+function recordGuestDiscovery(report, srcPort, dstPort, layers) {
+  if (srcPort === 1900 || dstPort === 1900 || layers?.ssdp) {
+    report.discovery.ssdp++;
+    report.discovery.upnp++;
+  }
+  if (srcPort === 5353 || dstPort === 5353) report.discovery.mdns++;
+  if (srcPort === 5355 || dstPort === 5355) report.discovery.llmnr++;
+  if (srcPort === 137 || dstPort === 137 || layers?.nbns) report.discovery.netbios++;
+}
+
+function topMapEntries(map, limit = 20) {
+  return [...map.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([name, count]) => ({ name, count }));
+}
+
+function buildGuestWifiReport(tracker, websiteList) {
+  const captive = [...tracker.captiveVendors.values()].map(v => ({
+    vendor: v.vendor,
+    count: v.count,
+    sources: [...v.sources],
+  }));
+  const discoveryTotal = Object.values(tracker.discovery).reduce((sum, n) => sum + n, 0);
+  const sensitiveLeaks = tracker.http.post + tracker.http.cookies + tracker.http.auth + tracker.http.piiHints;
+  const detected = captive.length > 0 || tracker.wpadCount > 0 || discoveryTotal > 0 || tracker.http.total > 0;
+
+  let riskLevel = 'good';
+  if (sensitiveLeaks > 0) riskLevel = 'high';
+  else if (tracker.wpadCount > 0 || discoveryTotal > 20) riskLevel = 'caution';
+
+  const reasons = [];
+  if (captive.length > 0) reasons.push('Captive portal or guest WiFi vendor detected');
+  if (tracker.wpadCount > 0) reasons.push('WPAD proxy-discovery lookups visible');
+  if (discoveryTotal > 0) reasons.push('Local discovery traffic visible on the network');
+  if (tracker.http.total > 0) reasons.push('Some clear HTTP traffic was visible');
+  if (websiteList?.length > 0) reasons.push('Domains are visible through DNS or TLS metadata');
+
+  return {
+    detected,
+    riskLevel,
+    reasons,
+    captivePortal: {
+      detected: captive.length > 0,
+      vendors: captive,
+    },
+    personalData: {
+      cleartextPostCount: tracker.http.post,
+      cookieCount: tracker.http.cookies,
+      authHeaderCount: tracker.http.auth,
+      sensitiveHintCount: tracker.http.piiHints,
+      status: sensitiveLeaks > 0 ? 'risk' : 'clean',
+      summary: sensitiveLeaks > 0
+        ? 'Possible personal data or session material appeared in clear HTTP traffic.'
+        : 'No cleartext phone, email, OTP, password, cookie, or auth token indicators were found.',
+      samples: tracker.http.riskySamples,
+    },
+    http: {
+      total: tracker.http.total,
+      lowRiskCount: tracker.http.lowRisk,
+      topHosts: topMapEntries(tracker.http.hosts, 10),
+      lowRiskSamples: tracker.http.lowRiskSamples,
+    },
+    domains: {
+      visibleCount: tracker.visibleDomains.size,
+      top: topMapEntries(tracker.visibleDomains, 20),
+    },
+    wpad: {
+      detected: tracker.wpadCount > 0,
+      count: tracker.wpadCount,
+    },
+    sharedLan: {
+      detected: discoveryTotal > 0,
+      total: discoveryTotal,
+      ...tracker.discovery,
+    },
+    recommendations: [
+      'Use a VPN on guest WiFi when you do not want the network owner to see domain metadata.',
+      'Keep HTTPS-only mode enabled in the browser.',
+      'Disable network discovery and file sharing before joining guest networks.',
+      'Avoid submitting personal details on pages that are not HTTPS.',
+    ],
+  };
 }
 
 function flattenLayerValues(value) {

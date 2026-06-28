@@ -3,6 +3,7 @@ import {
   explainFindings, summarizeSession,
   getAIStatus, initAI, probeStatus,
 } from '../core/geminiNano.js';
+import GuestWifiReport from './GuestWifiReport.jsx';
 
 /** Build instant template explanations from findings — shown before AI loads */
 function buildTemplateExplanations(findings) {
@@ -11,9 +12,10 @@ function buildTemplateExplanations(findings) {
 
 export default function SecurityTab({
   alerts, retransmissions, avgRtt, nxdomainCount, selfIp, onGoToDevices,
-  findings, deviceCount,
+  findings, deviceCount, guestWifi,
 }) {
   const [selfExpanded, setSelfExpanded]   = useState(false);
+  const [guestReportOpen, setGuestReportOpen] = useState(false);
   const [explanations, setExplanations]   = useState([]);     // [{id, explanation}] — templates or AI-upgraded
   const [aiSummary, setAiSummary]         = useState(null);   // string
   const [aiLoading, setAiLoading]         = useState(false);
@@ -89,9 +91,16 @@ export default function SecurityTab({
 
   const criticalCount = realAlerts.filter(a => a.severity === 'critical').length;
   const warningCount  = realAlerts.filter(a => a.severity === 'warning').length;
+  const showGuestWifi = guestWifi?.detected;
 
   return (
     <div className="space-y-6">
+      {guestReportOpen && (
+        <GuestWifiReport
+          report={guestWifi}
+          onClose={() => setGuestReportOpen(false)}
+        />
+      )}
 
       {/* Self-device banner when IP not set */}
       {!selfIp && (
@@ -110,6 +119,38 @@ export default function SecurityTab({
               Go to Devices ↓
             </button>
           )}
+        </div>
+      )}
+
+      {/* Guest WiFi compact entry point */}
+      {showGuestWifi && (
+        <div className="bg-cyan-900/20 border border-cyan-800/40 rounded-2xl p-5
+        flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <span className={`text-xs px-2 py-0.5 rounded-full uppercase tracking-wide
+              ${guestWifi.riskLevel === 'high'
+                ? 'bg-red-900/50 text-red-300'
+                : guestWifi.riskLevel === 'caution'
+                ? 'bg-yellow-900/50 text-yellow-300'
+                : 'bg-green-900/50 text-green-300'}`}>
+                {guestWifi.riskLevel}
+              </span>
+              <p className="text-white text-sm font-semibold">Guest WiFi privacy check available</p>
+            </div>
+            <p className="text-cyan-200/80 text-sm">
+              SniffPal found guest-network signals such as visible domains, captive-portal clues,
+              clear HTTP, or local discovery traffic.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setGuestReportOpen(true)}
+            className="flex-shrink-0 bg-cyan-600 hover:bg-cyan-500 text-white
+            text-sm px-4 py-2 rounded-xl transition-colors"
+          >
+            View Guest WiFi Report
+          </button>
         </div>
       )}
 

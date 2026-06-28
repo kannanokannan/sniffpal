@@ -15,7 +15,8 @@ SniffPal is a local-first network intelligence tool. Drop in a packet capture an
 - **Security findings** - structured findings with IDs such as `PRIV_MDNS_001` and `IOT_TEL_001`
 - **AI insights** - plain-English explanations via Chrome on-device AI or local fallback templates
 - **Health Score** - 0-100 network security score with grade
-- **Topology Map** - larger clustered star map with animated links, device clusters, Wi-Fi band rings, click-to-inspect cards, and inferred gateway detection when the real router is not directly seen in the capture
+- **Topology Map** - compact dashboard preview plus expandable connected-box map, device groups, click-to-inspect cards, and inferred gateway detection when the real router is not directly seen in the capture
+- **Guest WiFi Privacy Report** - contextual report for captive portals, visible domains, clear HTTP, WPAD, and shared-LAN discovery
 - **Pi live monitor** - capture progress, packet count, device count, protocol mix, CPU, RAM, temperature, uptime, local time, and live network I/O while the Pi is running
 - **Band detection** - 2.4 GHz / 5 GHz / 6 GHz per device from monitor mode captures
 - **PDF export** - full installer-style report with devices, findings, traffic, and recommendations
@@ -55,7 +56,7 @@ Packet capture needs raw network access on Linux, so start the Pi server with `s
 - Live Pi system metrics: CPU, RAM, temperature, uptime, local time, and network upload/download speed
 - Capture mode switch: Standard mode for built-in Wi-Fi, Monitor mode for USB adapters with band detection
 - Browser-based analysis; the Pi captures and serves data locally
-- Topology map uses capture data to show device clusters and gateway relationships
+- Topology map uses capture data to show device groups and gateway relationships
 
 ## Capture Tools
 
@@ -101,7 +102,8 @@ scapy-capture-tool/    Python packet capture tools
 - [x] AI insights with graceful local fallback
 - [x] PDF export
 - [x] Raspberry Pi mode
-- [x] Network Topology Map with clustered layout and inferred gateway
+- [x] Network Topology Map with expandable connected-box layout and inferred gateway
+- [x] Guest WiFi Privacy Report with compact entry point and slide-over detail view
 - [x] Monitor mode capture with 2.4 / 5 / 6 GHz band detection
 - [x] Pi live capture progress and system metrics
 - [x] UPnP IGD AddPortMapping detection
