@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 const ROUTER_HINTS = [
   'router', 'gateway', 'access_point', 'netgear', 'tp-link', 'tplink',
@@ -173,7 +174,8 @@ function DetailPanel({ selected, router, inferred, onClose }) {
           The gateway was not seen directly, so SniffPal inferred the subnet gateway address.
         </p>
       )}
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -192,9 +194,11 @@ function TopologyModal({ devices, captureMode, onClose }) {
   const { router, inferred, clusters } = useMemo(() => buildTopology(devices), [devices]);
   const hasBandData = devices.some(d => d.band);
 
-  return (
-    <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm p-4 md:p-8 print:hidden">
-      <div className="h-full max-w-7xl mx-auto bg-slate-950 border border-white/10 rounded-2xl overflow-hidden shadow-2xl flex flex-col">
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] w-screen h-screen bg-slate-950/90 backdrop-blur-md p-3 md:p-6 print:hidden">
+      <div className="h-full w-full max-w-[1600px] mx-auto bg-slate-950 border border-white/10 rounded-2xl overflow-hidden shadow-2xl flex flex-col">
         <div className="px-6 py-4 border-b border-white/10 flex items-start justify-between gap-4">
           <div>
             <h2 className="text-xl font-semibold text-white">Network Topology</h2>
