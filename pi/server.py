@@ -13,7 +13,7 @@ Access:
 """
 
 from flask import Flask, jsonify, send_from_directory, request, Response
-import os, json, glob, subprocess, threading, sys, time, socket
+import os, json, glob, subprocess, threading, sys, time, socket, signal
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -29,6 +29,8 @@ SETTINGS_FILE = os.path.join(os.path.dirname(__file__), 'settings.json')
 MAX_DIGESTS   = 48
 os.makedirs(DIGEST_DIR, exist_ok=True)
 capture_lock = threading.Lock()
+capture_process = None
+capture_stop_requested = False
 capture_state = {
     'running': False,
     'startedAt': None,
@@ -169,6 +171,29 @@ def start_capture():
     threading.Thread(target=run_capture, daemon=True).start()
     return jsonify({'status': 'started'})
 
+@app.route('/api/capture/stop', methods=['POST'])
+def stop_capture():
+    global capture_stop_requested
+    with capture_lock:
+        if not capture_state['running']:
+            return jsonify({'status': 'idle', 'capture': dict(capture_state)})
+        capture_stop_requested = True
+        capture_state['lastMessage'] = 'Stopping capture and saving...'
+        proc = capture_process
+
+    if proc and proc.poll() is None:
+        try:
+            if os.name == 'nt':
+                proc.send_signal(signal.SIGINT)
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    return jsonify({'status': 'stopping', 'capture': dict(capture_state)})
+
 @app.route('/api/capture/events')
 def capture_events():
     def stream():
@@ -262,6 +287,7 @@ def get_device_info(settings):
 
 def run_capture():
     """Run a capture using current settings and store the digest."""
+    global capture_process, capture_stop_requested
     import tempfile
 
     with capture_lock:
@@ -277,6 +303,7 @@ def run_capture():
             'lastMessage': 'Starting capture',
             'error': None,
         })
+        capture_stop_requested = False
 
     settings = load_settings()
     mode     = settings.get('mode', 'standard')
@@ -310,7 +337,11 @@ def run_capture():
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            start_new_session=(os.name != 'nt'),
         )
+        with capture_lock:
+            capture_process = proc
+
         deadline = time.time() + duration + 60
         for line in proc.stdout:
             line = line.strip()
@@ -345,8 +376,14 @@ def run_capture():
                 raise subprocess.TimeoutExpired(capture_cmd, duration + 60)
 
         rc = proc.wait(timeout=5)
-        if rc != 0:
+        with capture_lock:
+            stopped_early = capture_stop_requested
+
+        if rc != 0 and not stopped_early:
             raise subprocess.CalledProcessError(rc, capture_cmd)
+
+        if not os.path.exists(raw_path) or os.path.getsize(raw_path) == 0:
+            raise RuntimeError('Capture stopped before any packets were saved')
 
         with open(raw_path) as f:
             raw = json.load(f)
@@ -364,11 +401,16 @@ def run_capture():
         with open(digest_path, 'w') as f:
             json.dump(digest, f)
 
-        print(f'[SniffPal Pi] Saved digest: digest-{ts}.json ({len(raw)} packets)', flush=True)
+        saved_message = (
+            f'Stopped and saved digest: digest-{ts}.json'
+            if stopped_early else
+            f'Saved digest: digest-{ts}.json'
+        )
+        print(f'[SniffPal Pi] {saved_message} ({len(raw)} packets)', flush=True)
         with capture_lock:
             capture_state.update({
                 'packets': len(raw),
-                'lastMessage': f'Saved digest: digest-{ts}.json',
+                'lastMessage': saved_message,
                 'error': None,
             })
 
@@ -397,6 +439,8 @@ def run_capture():
         if os.path.exists(raw_path):
             os.remove(raw_path)
         with capture_lock:
+            capture_process = None
+            capture_stop_requested = False
             capture_state['running'] = False
             capture_state['finishedAt'] = datetime.now().isoformat()
 

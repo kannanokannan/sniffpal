@@ -250,6 +250,38 @@ export default function App() {
     }
   }, [fetchPiStatus]);
 
+  const handlePiStopAndAnalyze = useCallback(async () => {
+    try {
+      setPiStatus(prev => ({
+        ...(prev || {}),
+        capture: {
+          ...(prev?.capture || {}),
+          running: true,
+          lastMessage: 'Stopping capture and saving...',
+        },
+      }));
+
+      const res = await fetch('/api/capture/stop', { method: 'POST' });
+      if (!res.ok) throw new Error('Stop request failed');
+
+      for (let i = 0; i < 45; i++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const statusRes = await fetch('/api/status');
+        const status = await statusRes.json();
+        setPiStatus(status);
+        setPiCapturing(Boolean(status.capture?.running));
+        if (!status.capture?.running) {
+          await handlePiLoadLatest();
+          return;
+        }
+      }
+
+      alert('Capture is still stopping. Try Load Latest in a few seconds.');
+    } catch (e) {
+      alert('Failed to stop capture: ' + e.message);
+    }
+  }, [handlePiLoadLatest]);
+
   const handlePiSaveSettings = useCallback(async () => {
     localStorage.setItem('sniffpal_pi_settings', JSON.stringify(piSettings));
     try {
@@ -603,7 +635,7 @@ export default function App() {
                 )}
 
                 {/* Action Buttons */}
-                <div className="grid grid-cols-2 gap-3">
+                <div className={`grid gap-3 ${piCapturing ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-2'}`}>
                   <button
                     onClick={handlePiStartCapture}
                     disabled={piCapturing}
@@ -614,9 +646,19 @@ export default function App() {
                   >
                     ▶ Start Capture
                   </button>
+                  {piCapturing && (
+                    <button
+                      onClick={handlePiStopAndAnalyze}
+                      className="bg-amber-600 hover:bg-amber-500
+                      text-white font-medium py-3 px-4 rounded-xl
+                      transition-all flex items-center justify-center gap-2"
+                    >
+                      Stop & Analyze
+                    </button>
+                  )}
                   <button
                     onClick={handlePiLoadLatest}
-                    disabled={!piStatus?.latest}
+                    disabled={!piStatus?.latest || piCapturing}
                     className="bg-slate-700 hover:bg-slate-600
                     disabled:bg-slate-800 disabled:text-slate-600
                     text-white font-medium py-3 px-4 rounded-xl
