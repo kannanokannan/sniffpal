@@ -174,8 +174,7 @@ function DetailPanel({ selected, router, inferred, onClose }) {
           The gateway was not seen directly, so SniffPal inferred the subnet gateway address.
         </p>
       )}
-    </div>,
-    document.body
+    </div>
   );
 }
 
@@ -267,7 +266,8 @@ function TopologyModal({ devices, captureMode, onClose }) {
           />
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
