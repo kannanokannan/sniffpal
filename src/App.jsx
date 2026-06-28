@@ -262,7 +262,13 @@ export default function App() {
       }));
 
       const res = await fetch('/api/capture/stop', { method: 'POST' });
-      if (!res.ok) throw new Error('Stop request failed');
+      if (!res.ok) {
+        throw new Error(
+          res.status === 405
+            ? 'Pi backend needs restart. Run: sudo systemctl restart sniffpal'
+            : 'Stop request failed'
+        );
+      }
 
       for (let i = 0; i < 45; i++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -281,6 +287,26 @@ export default function App() {
       alert('Failed to stop capture: ' + e.message);
     }
   }, [handlePiLoadLatest]);
+
+  const handlePiModeChange = useCallback(async (mode) => {
+    const nextSettings = { ...piSettings, mode };
+    setPiSettings(nextSettings);
+    localStorage.setItem('sniffpal_pi_settings', JSON.stringify(nextSettings));
+    try {
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          interval: nextSettings.interval,
+          interface: nextSettings.interface,
+          mode: nextSettings.mode,
+          monitorInterface: nextSettings.monitorInterface,
+          monitorPackets: nextSettings.monitorPackets,
+        }),
+      });
+      fetchPiStatus();
+    } catch { /* keep local UI state even if server save fails */ }
+  }, [fetchPiStatus, piSettings]);
 
   const handlePiSaveSettings = useCallback(async () => {
     localStorage.setItem('sniffpal_pi_settings', JSON.stringify(piSettings));
@@ -601,6 +627,47 @@ export default function App() {
                   </div>
                 )}
 
+                {/* Capture Mode */}
+                <div className="bg-slate-800/50 border border-white/10 rounded-2xl p-4">
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <div>
+                      <p className="text-white text-sm font-semibold">Capture mode</p>
+                      <p className="text-slate-500 text-xs">
+                        Choose built-in Wi-Fi or USB monitor adapter before capture.
+                      </p>
+                    </div>
+                    {piCapturing && (
+                      <span className="text-[10px] text-amber-300 bg-amber-900/30 border border-amber-800/50 rounded-full px-2 py-1">
+                        Locked while capturing
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      ['standard', 'Standard Wi-Fi', piSettings.interface || 'wlan0'],
+                      ['monitor', 'USB Monitor', piSettings.monitorInterface || 'wlan1mon'],
+                    ].map(([mode, label, hint]) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        disabled={piCapturing}
+                        onClick={() => handlePiModeChange(mode)}
+                        className={`text-left rounded-xl border px-3 py-3 transition-all disabled:opacity-50
+                        ${piSettings.mode === mode
+                          ? 'bg-cyan-600/20 border-cyan-500/70 text-white'
+                          : 'bg-slate-900/60 border-white/10 text-slate-300 hover:border-white/25'
+                        }`}
+                      >
+                        <span className="block text-sm font-semibold">{label}</span>
+                        <span className="block text-[11px] text-slate-500 mt-0.5">{hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-slate-500 text-[11px] mt-3">
+                    USB Monitor adds 2.4 / 5 / 6 GHz band data when a compatible adapter is configured.
+                  </p>
+                </div>
+
                 {/* Capture Progress */}
                 {(piCapturing || piStatus?.capture?.lastMessage || piStatus?.capture?.error) && (
                   <div className="bg-blue-900/20 border border-blue-800/40
@@ -685,34 +752,6 @@ export default function App() {
                 {piSettingsOpen && (
                   <div className="bg-slate-800/60 border border-white/10
                   rounded-2xl p-5 space-y-4">
-                    <div>
-                      <label className="text-slate-400 text-xs block mb-2">
-                        Capture Mode
-                      </label>
-                      <div className="grid grid-cols-2 gap-2">
-                        {[
-                          ['standard', 'Standard', 'Built-in Wi-Fi'],
-                          ['monitor', 'Monitor', 'USB adapter'],
-                        ].map(([mode, label, hint]) => (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => setPiSettings(s => ({ ...s, mode }))}
-                            className={`text-left rounded-xl border px-3 py-2 transition-all
-                            ${piSettings.mode === mode
-                              ? 'bg-cyan-600/20 border-cyan-500/60 text-white'
-                              : 'bg-slate-700/60 border-white/10 text-slate-300 hover:border-white/20'
-                            }`}
-                          >
-                            <span className="block text-sm font-medium">{label}</span>
-                            <span className="block text-[10px] text-slate-500">{hint}</span>
-                          </button>
-                        ))}
-                      </div>
-                      <p className="text-slate-500 text-[11px] mt-2">
-                        Standard mode gives full traffic analysis. Monitor mode adds Wi-Fi band rings with a compatible adapter.
-                      </p>
-                    </div>
                     <div>
                       <label className="text-slate-400 text-xs block mb-1">
                         Capture Interval
